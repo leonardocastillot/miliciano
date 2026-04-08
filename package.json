@@ -1,0 +1,27 @@
+{
+  "name": "@milytics/miliciano",
+  "version": "0.1.2",
+  "description": "Miliciano CLI by Milytics",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "miliciano": "bin/miliciano.js"
+  },
+  "files": [
+    "bin/miliciano.js",
+    "miliciano-poc/bin/miliciano",
+    "miliciano-poc/bin/miliciano_controls.py",
+    "miliciano-poc/bin/miliciano_exec.py",
+    "miliciano-poc/bin/miliciano_obsidian.py",
+    "miliciano-poc/bin/miliciano_runtime.py",
+    "miliciano-poc/bin/miliciano_setup.py",
+    "miliciano-poc/bin/miliciano_status.py",
+    "miliciano-poc/bin/miliciano_ui.py"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ]
+}

@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+import base64
+import html
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from textwrap import dedent, wrap
+
+from miliciano_obsidian import *
+from miliciano_runtime import *
+from miliciano_ui import *
+from miliciano_controls import *
+from miliciano_status import *
+from miliciano_setup import *
+from miliciano_exec import *
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def main():
+    if len(sys.argv) < 2:
+        cmd_shell()
+        return
+
+    sub = sys.argv[1]
+    arg = " ".join(sys.argv[2:]).strip()
+    args = sys.argv[2:]
+
+    if sub == "status":
+        cmd_status()
+        return
+    if sub == "model":
+        cmd_model(args)
+        return
+    if sub == "route":
+        cmd_route(args)
+        return
+    if sub == "auth":
+        cmd_auth(args)
+        return
+    if sub == "provider":
+        cmd_provider(args)
+        return
+    if sub == "obsidian":
+        cmd_obsidian(args)
+        return
+    if sub == "setup":
+        cmd_setup()
+        return
+    if sub == "doctor":
+        cmd_doctor()
+        return
+    if sub == "think":
+        if not arg:
+            print("Falta prompt para think", file=sys.stderr)
+            sys.exit(1)
+        cmd_think(arg)
+        return
+    if sub == "exec":
+        if not arg:
+            print("Falta prompt para exec", file=sys.stderr)
+            sys.exit(1)
+        cmd_exec(arg)
+        return
+    if sub == "mission":
+        if not arg:
+            print("Falta objetivo para mission", file=sys.stderr)
+            sys.exit(1)
+        cmd_mission(arg)
+        return
+    if sub == "shell":
+        cmd_shell()
+        return
+    if sub in {"-h", "--help", "help"}:
+        usage()
+        return
+
+    print(f"Subcomando desconocido: {sub}", file=sys.stderr)
+    usage()
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
