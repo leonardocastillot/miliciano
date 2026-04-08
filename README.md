@@ -14,6 +14,7 @@ Uso:
 miliciano
 miliciano status
 miliciano setup
+miliciano repair
 miliciano doctor
 miliciano think "..."
 miliciano exec "..."
@@ -28,4 +29,8 @@ Requisitos:
 Notas:
 - El comando `miliciano` abre la consola interactiva.
 - Si se ejecuta sin argumentos, muestra el banner de arranque.
+- `miliciano setup` instala y deja configurado el stack base.
+- `miliciano status` solo muestra el estado.
+- `miliciano doctor` hace diagnóstico profundo.
+- `miliciano repair` repara wrappers, PATH y sincronización local.
 - El runtime principal sigue siendo el CLI Python incluido en `miliciano-poc/bin`.

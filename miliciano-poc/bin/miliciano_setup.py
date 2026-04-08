@@ -8,6 +8,97 @@ from miliciano_runtime import *
 from miliciano_ui import *
 from miliciano_obsidian import *
 
+SOUL_TEMPLATE = """# Miliciano SOUL
+
+Perfil mínimo del espacio personal de Miliciano.
+
+- Producto: Miliciano
+- Marca: Milytics
+- Rol: CLI/chat táctico
+- Objetivo: razonar, ejecutar y dejar trazabilidad
+- Estado: este archivo se crea o repara durante setup/repair
+"""
+
+
+def ensure_miliciano_soul(profile_dir):
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    soul_path = profile_dir / "SOUL.md"
+    if soul_path.exists():
+        return False, f"SOUL.md presente en {soul_path}"
+    soul_path.write_text(SOUL_TEMPLATE, encoding="utf-8")
+    activity_line("SOUL.md creado", str(soul_path))
+    return True, f"SOUL.md creado en {soul_path}"
+
+
+def repair_nemoclaw_wrapper():
+    wrapper = Path.home() / ".local" / "bin" / "nemoclaw"
+    npm_prefix_res = run(["npm", "prefix", "-g"], capture=True, timeout=10)
+    npm_prefix = (npm_prefix_res.stdout or "").strip().splitlines()[-1].strip() if npm_prefix_res and npm_prefix_res.returncode == 0 else ""
+    npm_global_bin = Path(npm_prefix) / "bin" if npm_prefix else None
+    global_candidate = (npm_global_bin / "nemoclaw") if npm_global_bin else None
+
+    if not global_candidate or not global_candidate.exists():
+        if wrapper.exists():
+            return False, f"No detecté binario global de Nemoclaw para reparar {wrapper}"
+        return False, "No detecté una instalación global de Nemoclaw"
+
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper_content = """#!/usr/bin/env bash
+set -euo pipefail
+if command -v npm >/dev/null 2>&1; then
+  NPM_PREFIX="$(npm prefix -g 2>/dev/null | tail -n 1)"
+  if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/nemoclaw" ]; then
+    exec "$NPM_PREFIX/bin/nemoclaw" "$@"
+  fi
+fi
+if command -v nemoclaw >/dev/null 2>&1; then
+  exec "$(command -v nemoclaw)" "$@"
+fi
+printf '[Nemoclaw] existe instalación, pero no está expuesta correctamente en PATH.\\n' >&2
+exit 1
+"""
+    wrapper.write_text(wrapper_content, encoding="utf-8")
+    os.chmod(wrapper, 0o755)
+    activity_line("Wrapper de Nemoclaw reparado", str(wrapper))
+    return True, f"Wrapper recreado en {wrapper}"
+
+
+def repair_core_stack():
+    state = load_miliciano_state(refresh=True)
+    actions = []
+
+    hermes_provider = state["hermes"]["provider"]
+    hermes_model = state["hermes"]["model"]
+    sync_hermes_global_config(hermes_provider, hermes_model)
+    sync_hermes_profile_config(hermes_provider, hermes_model)
+    actions.append(f"Hermes sincronizado en {hermes_provider}/{hermes_model}")
+
+    profile_dir = Path(MILICIANO_HERMES_HOME)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    if Path(MILICIANO_HERMES_HOME).exists() and not Path(MILICIANO_HERMES_HOME).joinpath("SOUL.md").exists():
+        created, detail = ensure_miliciano_soul(profile_dir)
+        actions.append(detail)
+    else:
+        actions.append(f"SOUL.md presente en {Path(MILICIANO_HERMES_HOME) / 'SOUL.md'}")
+
+    openclaw_path = which("openclaw")
+    if openclaw_path:
+        current_model = state["openclaw"]["model"]
+        run(["openclaw", "models", "set", current_model], capture=True, timeout=12)
+        ok, detail = sync_openclaw_fallback_route(state)
+        actions.append(f"OpenClaw alineado a {current_model}")
+        actions.append(detail)
+    else:
+        actions.append("OpenClaw no instalado; no pude re-alinear execution/fallback")
+
+    repaired, nemo_detail = repair_nemoclaw_wrapper()
+    actions.append(nemo_detail)
+    if repaired:
+        activity_line("Repair completado", "Nemoclaw / configs / fallback")
+    return actions
+
+
 def cmd_setup():
     from pathlib import Path
     from shutil import which
@@ -68,6 +159,9 @@ def cmd_setup():
     box_line("Este comando revisa el stack, aplica lo que puede automáticamente y, si lo corres otra vez, te dice qué ya estaba instalado y qué falta.")
     box_rule()
     box_line("Cargando información del entorno...")
+    box_line("• Reparando configuración base de Miliciano")
+    for action in repair_core_stack():
+        box_line(f"• {action}")
     box_line("• Revisando prerequisitos base del sistema")
 
     runtime = basic_runtime_status()
@@ -526,3 +620,35 @@ exit 1
     if sys.stdin.isatty() and sys.stdout.isatty() and setup_complete:
         if ask_yes_no("\n¿Quieres entrar ahora al chat de Miliciano?", default=False):
             interactive_chat()
+
+
+def cmd_repair():
+    GREEN = "\033[38;5;84m"
+    YELLOW = "\033[38;5;221m"
+    BOX_WIDTH = 74
+
+    def box_top(title="REPAIR MILICIANO", subtitle="Corrige wrappers, configs y sincronización"):
+        print(f"{VIOLET}{'═' * BOX_WIDTH}{RESET}")
+        print(split_columns(f"{BOLD}{title}{RESET}", f"{SOFT}{subtitle}{RESET}", BOX_WIDTH))
+        print(f"{VIOLET}{'─' * BOX_WIDTH}{RESET}")
+
+    def box_line(text=""):
+        lines = wrap(text, width=BOX_WIDTH) if text else [""]
+        for line in lines:
+            print(line)
+
+    def box_bottom():
+        print(f"{VIOLET}{'═' * BOX_WIDTH}{RESET}")
+
+    banner()
+    box_top()
+    box_line("Repair de Miliciano")
+    box_line("Este comando no instala el stack completo: repara la configuración local, wrappers y sincronización de rutas.")
+    box_line("Si setup ya dejó todo bien, repair solo confirmará y alineará los componentes que puedan haberse roto.")
+    box_line("")
+    for action in repair_core_stack():
+        box_line(f"• {action}")
+    box_line("")
+    box_line(f"Siguiente paso: usa {GREEN}miliciano status{RESET} para leer el estado y {GREEN}miliciano doctor{RESET} si quieres diagnóstico profundo.")
+    box_line(f"Si falta algún binario externo, {YELLOW}repair{RESET} no inventa instalaciones del sistema operativo.")
+    box_bottom()

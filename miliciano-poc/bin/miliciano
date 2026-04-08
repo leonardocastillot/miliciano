@@ -114,6 +114,9 @@ def main():
     if sub == "setup":
         cmd_setup()
         return
+    if sub == "repair":
+        cmd_repair()
+        return
     if sub == "doctor":
         cmd_doctor()
         return

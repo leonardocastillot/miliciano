@@ -1,6 +1,6 @@
 {
   "name": "@milytics/miliciano",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Miliciano CLI by Milytics",
   "license": "MIT",
   "type": "commonjs",
