@@ -66,10 +66,14 @@ def render_session_status(session_id=None, include_banner=True):
         f"policy     {status_badge('ready' if policy_ok else 'pending')}",
     ])
 
-    panel("RUNTIME BASE", [
-        f"{cmd:<7} {(status_badge('ready') if runtime[cmd]['path'] else status_badge('error'))}  {runtime[cmd]['version'] or 'no detectado'}"
-        for cmd in PREREQ_COMMANDS
-    ])
+    runtime_rows = []
+    for cmd in PREREQ_COMMANDS:
+        required = cmd in REQUIRED_SYSTEM_COMMANDS
+        kind = 'ready' if runtime[cmd]['path'] else ('error' if required else 'pending')
+        suffix = '' if required else ' · opcional'
+        runtime_rows.append(f"{cmd:<7} {status_badge(kind)}  {runtime[cmd]['version'] or 'no detectado'}{suffix}")
+
+    panel("RUNTIME BASE", runtime_rows)
 
     panel("STACK MILICIANO", [
         f"hermes    {(status_badge('ready') if hermes_path else status_badge('error'))}  {hermes_path or 'no encontrado'}",
@@ -126,17 +130,24 @@ def render_session_status(session_id=None, include_banner=True):
 def cmd_status():
     render_session_status()
 
-def cmd_doctor():
+def cmd_doctor(args=None):
     banner()
+    openclaw_path = which("openclaw")
     panel("DOCTOR", [
         f"hermes          {status_badge('info')} diagnóstico del core",
-        f"openclaw        {status_badge('info')} diagnóstico del motor de ejecución",
-        f"security audit  {status_badge('info')} revisión profunda de seguridad",
+        f"openclaw        {status_badge('info' if openclaw_path else 'pending')} diagnóstico del motor de ejecución",
+        f"security audit  {status_badge('info' if openclaw_path else 'pending')} revisión profunda de seguridad",
     ])
     print(f"{BOLD}Hermes doctor{RESET}")
     print(rule(accent="─"))
     run(["hermes", "doctor"])
     print()
+    if not openclaw_path:
+        print(f"{BOLD}OpenClaw doctor{RESET}")
+        print(rule(accent="─"))
+        print("OpenClaw no está instalado; se omite el diagnóstico profundo del motor de ejecución.")
+        print("Sugerencia: usa `miliciano bootstrap` o `miliciano setup --auto` con un hook de instalación, o instala OpenClaw manualmente.")
+        return
     print(f"{BOLD}OpenClaw doctor{RESET}")
     print(rule(accent="─"))
     run(["openclaw", "doctor"])

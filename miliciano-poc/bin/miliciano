@@ -112,13 +112,16 @@ def main():
         cmd_obsidian(args)
         return
     if sub == "setup":
-        cmd_setup()
+        cmd_setup(args)
+        return
+    if sub == "bootstrap":
+        cmd_bootstrap(args)
         return
     if sub == "repair":
         cmd_repair()
         return
     if sub == "doctor":
-        cmd_doctor()
+        cmd_doctor(args)
         return
     if sub == "think":
         if not arg:

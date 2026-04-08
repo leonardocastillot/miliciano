@@ -88,7 +88,9 @@ REASONING_ROUTE_KEYWORDS = {
     "security", "agent", "workflow", "integración", "integration", "multi-step", "multi step",
 }
 
-PREREQ_COMMANDS = ["node", "npm", "curl", "docker"]
+REQUIRED_SYSTEM_COMMANDS = ["python3", "node", "npm", "curl"]
+OPTIONAL_SYSTEM_COMMANDS = ["docker", "git", "tar", "zstd"]
+PREREQ_COMMANDS = REQUIRED_SYSTEM_COMMANDS + OPTIONAL_SYSTEM_COMMANDS
 
 
 _STATE_CACHE = None
@@ -99,6 +101,10 @@ _PREFERRED_LOCAL_OLLAMA_MODEL_CACHE = None
 def base_env():
     env = os.environ.copy()
     env.setdefault("HERMES_HOME", MILICIANO_HERMES_HOME)
+    local_bin = os.path.expanduser("~/.local/bin")
+    current_path = env.get("PATH", "")
+    if local_bin not in current_path.split(":"):
+        env["PATH"] = f"{local_bin}:{current_path}" if current_path else local_bin
     return env
 
 
@@ -310,6 +316,32 @@ def read_openclaw_primary_model():
     )
 
 
+
+
+def normalize_miliciano_state(state):
+    if not isinstance(state.get("routing"), dict):
+        state["routing"] = {}
+    if not isinstance(state.get("ollama"), dict):
+        state["ollama"] = {}
+    if not isinstance(state.get("nvidia"), dict):
+        state["nvidia"] = {}
+
+    fallback = state.get("routing", {}).get("fallback")
+    if isinstance(fallback, str) and fallback.startswith("nvidia/nvidia/"):
+        state["routing"]["fallback"] = fallback.replace("nvidia/nvidia/", "nvidia/", 1)
+
+    local_model_name = preferred_local_ollama_model()
+    local_spec = current_local_hermes_spec(local_model_name)
+    if local_spec:
+        state["routing"].setdefault("local", local_spec)
+        reasoning_spec = make_model_spec(state["hermes"]["provider"], state["hermes"]["model"])
+        current_fast = state["routing"].get("fast")
+        if current_fast in {None, "", reasoning_spec} and state.get("ollama", {}).get("auto_install", True):
+            state["routing"]["fast"] = local_spec
+        state["ollama"].setdefault("preferred_model", local_model_name)
+
+    return state
+
 def load_miliciano_state(refresh=False):
     global _STATE_CACHE
     if not refresh and _STATE_CACHE is not None:
@@ -331,12 +363,7 @@ def load_miliciano_state(refresh=False):
     if openclaw_model:
         state["openclaw"]["model"] = openclaw_model
 
-    if not isinstance(state.get("routing"), dict):
-        state["routing"] = {}
-    if not isinstance(state.get("ollama"), dict):
-        state["ollama"] = {}
-    if not isinstance(state.get("nvidia"), dict):
-        state["nvidia"] = {}
+    state = normalize_miliciano_state(state)
 
     local_model_name = preferred_local_ollama_model()
     route_defaults = default_route_targets(
@@ -611,19 +638,23 @@ def collect_nemoclaw_status():
 def basic_runtime_status():
     from shutil import which
 
+    version_commands = {
+        "python3": ["python3", "--version"],
+        "node": ["node", "-v"],
+        "npm": ["npm", "-v"],
+        "curl": ["curl", "--version"],
+        "docker": ["docker", "--version"],
+        "git": ["git", "--version"],
+        "tar": ["tar", "--version"],
+        "zstd": ["zstd", "--version"],
+    }
+
     info = {}
     for cmd in PREREQ_COMMANDS:
         path = which(cmd)
         version = None
         if path:
-            if cmd == "node":
-                version = capture_version(["node", "-v"])
-            elif cmd == "npm":
-                version = capture_version(["npm", "-v"])
-            elif cmd == "curl":
-                version = capture_version(["curl", "--version"])
-            elif cmd == "docker":
-                version = capture_version(["docker", "--version"])
+            version = capture_version(version_commands.get(cmd, [cmd, "--version"]))
         info[cmd] = {"path": path, "version": version}
     return info
 
