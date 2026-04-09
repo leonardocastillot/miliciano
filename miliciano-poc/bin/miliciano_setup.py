@@ -11,27 +11,41 @@ from miliciano_runtime import *
 from miliciano_ui import *
 from miliciano_obsidian import *
 
-SOUL_TEMPLATE = """# Miliciano SOUL
+def build_miliciano_soul(identity):
+    partner_name = identity.get("partner_name") or "Miliciano"
+    persona = identity.get("persona") or PERSONA_PRESETS[identity.get("persona_key") or "operator"]
+    owner_name = identity.get("owner_name") or "su operador principal"
+    interaction_style = identity.get("interaction_style") or "directo y útil"
+    language = identity.get("language") or "es"
+    return f"""# {partner_name} SOUL
 
-Perfil mínimo del espacio personal de Miliciano.
+Perfil vivo del partner tecnológico instalado.
 
 - Producto: Miliciano
 - Marca: Milytics
-- Rol: CLI/chat táctico
-- Objetivo: razonar, ejecutar y dejar trazabilidad
+- Nombre del partner: {partner_name}
+- Persona base: {persona['label']}
+- Tono: {persona['tone']}
+- Estilo operativo: {persona['style']}
+- Estilo de interacción: {interaction_style}
+- Idioma por defecto: {language}
+- Operador principal: {owner_name}
+- Objetivo: ayudar a pensar, ejecutar y dejar trazabilidad con criterio
 - Estado: este archivo se crea o repara durante setup/repair
 """
 
 
-def ensure_miliciano_soul(profile_dir):
+def ensure_miliciano_soul(profile_dir, force=False):
     profile_dir = Path(profile_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
     soul_path = profile_dir / "SOUL.md"
-    if soul_path.exists():
+    identity = get_partner_identity()
+    soul_text = build_miliciano_soul(identity)
+    if soul_path.exists() and not force:
         return False, f"SOUL.md presente en {soul_path}"
-    soul_path.write_text(SOUL_TEMPLATE, encoding="utf-8")
-    activity_line("SOUL.md creado", str(soul_path))
-    return True, f"SOUL.md creado en {soul_path}"
+    soul_path.write_text(soul_text, encoding="utf-8")
+    activity_line("SOUL.md creado/actualizado", str(soul_path))
+    return True, f"SOUL.md sincronizado en {soul_path}"
 
 
 def repair_nemoclaw_wrapper():
@@ -97,6 +111,7 @@ def repair_core_stack():
         created, detail = ensure_miliciano_soul(profile_dir)
         actions.append(detail)
     else:
+        ensure_miliciano_soul(profile_dir, force=True)
         actions.append(f"SOUL.md presente en {Path(MILICIANO_HERMES_HOME) / 'SOUL.md'}")
 
     openclaw_path = which("openclaw")
@@ -501,6 +516,16 @@ def cmd_setup(args=None):
                 return False
             print("Responde y/s o n.")
 
+    def ask_text(question, default=""):
+        if not interactive:
+            return default
+        try:
+            answer = input(f"{question} [{default}] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+        return answer or default
+
     banner()
     box_top("SETUP MILICIANO", "Ctrl+C para salir del setup")
     if unknown_args:
@@ -532,6 +557,28 @@ def cmd_setup(args=None):
     local_base_model = ollama_recos[0][0]
     local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
     box_line("• Revisando perfil e identidad de Miliciano")
+
+    identity = seed_partner_identity_from_env(persist=auto_mode and not dry_run)
+    if interactive and identity.get('partner_name') == 'Miliciano' and not identity.get('owner_name'):
+        box_line("• Configurando identidad personal del partner")
+        partner_name = ask_text("¿Cómo se llamará tu Miliciano?", os.environ.get("MILICIANO_PARTNER_NAME", "Miliciano"))
+        persona_default = os.environ.get("MILICIANO_PERSONA", identity.get('persona_key') or 'operator')
+        persona_key = ask_text("Persona base (operator/guardian/builder/concierge)", persona_default).lower()
+        if persona_key not in PERSONA_PRESETS:
+            persona_key = persona_default
+        owner_name = ask_text("¿Cómo se llama su operador principal?", os.environ.get("MILICIANO_OWNER_NAME", ""))
+        interaction_style = ask_text("¿Qué estilo debe tener?", os.environ.get("MILICIANO_INTERACTION_STYLE", identity.get('interaction_style') or 'directo y útil'))
+        language = ask_text("Idioma por defecto", os.environ.get("MILICIANO_LANGUAGE", identity.get('language') or 'es'))
+        identity = set_partner_identity(
+            partner_name=partner_name,
+            persona_key=persona_key,
+            owner_name=owner_name,
+            interaction_style=interaction_style,
+            language=language,
+        )
+        box_line(f"• Identidad configurada: {identity['partner_name']} ({identity['persona_key']})")
+    elif not interactive:
+        box_line(f"• Identidad activa: {identity.get('partner_name') or 'Miliciano'} ({identity.get('persona_key') or 'operator'})")
 
     profile_dir = Path(MILICIANO_HERMES_HOME)
     soul_path = profile_dir / "SOUL.md"

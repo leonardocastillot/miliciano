@@ -43,6 +43,19 @@ def render_session_status(session_id=None, include_banner=True):
     ollama_status = collect_ollama_status()
     local_hw = collect_local_ai_hardware()
     ollama_recos = recommend_ollama_models(local_hw)
+    orchestration = load_last_orchestration_report()
+    orchestration_decision = orchestration.get("decision") or {}
+    orchestration_policy = orchestration.get("policy") or {}
+    orchestration_execution = orchestration.get("execution") or {}
+    orchestration_policy_ready = bool(orchestration_policy.get("verdict"))
+    output_mode = get_output_mode()
+    route_mode = get_route_mode()
+    permission_mode = get_permission_mode()
+    project_instructions = load_miliciano_project_instructions()
+    reasoning_probe = probe_reasoning_path()
+    execution_probe = probe_execution_path()
+    local_probe = probe_local_path()
+    boundary_probe = probe_boundary_path()
 
     execution_limit_kind = "pending"
     execution_limit_text = "sin señal de cuota agotada"
@@ -61,9 +74,26 @@ def render_session_status(session_id=None, include_banner=True):
         reasoning_limit_text = hermes_model["last_error"] or "último error sugiere cuota/límite agotado"
 
     panel("PANEL OPERATIVO", [
-        f"reasoning  {status_badge('ready' if reasoning_ok else 'pending')}",
-        f"execution  {status_badge('ready' if execution_ok else 'pending')}",
-        f"policy     {status_badge('ready' if policy_ok else 'pending')}",
+        f"reasoning      {status_badge('ready' if reasoning_ok else 'pending')}",
+        f"execution      {status_badge('ready' if execution_ok else 'pending')}",
+        f"policy         {status_badge('ready' if policy_ok else 'pending')}",
+        f"orchestration  {status_badge('ready' if orchestration_policy_ready else 'pending')}",
+    ])
+
+    panel("MODOS DE PRODUCTO", [
+        f"output        {output_mode}",
+        f"route         {route_mode}",
+        f"permission    {permission_mode}",
+    ])
+
+    identity = get_partner_identity()
+    panel("IDENTIDAD DEL PARTNER", [
+        f"nombre        {identity.get('partner_name') or 'Miliciano'}",
+        f"persona       {identity.get('persona_key') or 'operator'}",
+        f"tono          {(identity.get('persona') or {}).get('tone')}",
+        f"estilo        {identity.get('interaction_style') or 'directo y útil'}",
+        f"idioma        {identity.get('language') or 'es'}",
+        f"operador      {identity.get('owner_name') or 'n/d'}",
     ])
 
     runtime_rows = []
@@ -94,6 +124,13 @@ def render_session_status(session_id=None, include_banner=True):
         f"sugerido  {ollama_recos[0][0]} · {ollama_recos[0][1]}",
     ])
 
+    panel("SALUD END-TO-END", [
+        f"reasoning   {status_badge(reasoning_probe['kind'])}  {reasoning_probe['summary']}",
+        f"execution   {status_badge(execution_probe['kind'])}  {execution_probe['summary']}",
+        f"local       {status_badge(local_probe['kind'])}  {local_probe['summary']}",
+        f"boundary    {status_badge(boundary_probe['kind'])}  {boundary_probe['summary']}",
+    ])
+
     panel("MODELOS Y LÍMITES", [
         f"hermes    {status_badge('ready' if reasoning_ok else 'pending')}  {hermes_model['provider']}/{hermes_model['model']}",
         f"          plan={hermes_model['plan'] or 'n/d'} · auth={hermes_model['auth_mode'] or 'n/d'} · expira={format_timestamp(hermes_model['expires_at'])}",
@@ -105,12 +142,37 @@ def render_session_status(session_id=None, include_banner=True):
         f"nemoclaw {status_badge('ready' if policy_ok else 'pending')}  modelo reservado={nemoclaw_model['model'] or 'sin definir'}",
     ])
 
+    panel("ORQUESTACIÓN", [
+        f"último intent    {orchestration_decision.get('intent') or 'n/d'}",
+        f"último target    {orchestration_decision.get('target') or 'n/d'}",
+        f"policy verdict   {orchestration_policy.get('verdict') or 'n/d'}",
+        f"policy reason    {orchestration_policy.get('reason') or 'n/d'}",
+        f"policy mode      {orchestration_policy.get('mode') or permission_mode}",
+        f"exec outcome     {orchestration_execution.get('outcome') or 'n/d'}",
+        f"exec verified    {'sí' if orchestration_execution.get('verified') else 'no' if orchestration_execution else 'n/d'}",
+    ])
+
     obsidian = collect_obsidian_status()
     panel("OBSIDIAN CEREBRO", [
         f"vault     {status_badge('ready' if obsidian['present'] else 'pending')}  {obsidian['path']}",
         f"notas     {obsidian['total_notes']}",
         f"dashboard {status_badge('ready' if obsidian['dashboard_exists'] else 'pending')}  00 Dashboard",
         f"miliciano {status_badge('ready' if obsidian['miliciano_exists'] else 'pending')}  {OBSIDIAN_MILICIANO_NOTE}",
+    ])
+
+    panel("INSTRUCCIONES DE PROYECTO", [
+        f"MILICIANO.md  {status_badge('ready' if project_instructions['present'] else 'pending')}  {project_instructions['path'] or 'no detectado'}",
+    ])
+
+    jobs = list_miliciano_jobs()
+    tasks = list_open_miliciano_tasks()
+    panel("JOBS PERSISTENTES", [
+        f"jobs         {len(jobs)} definidos",
+        f"modelo       Miliciano guarda intención; Hermes razona; OpenClaw ejecuta",
+    ])
+    panel("TASKS ABIERTAS", [
+        f"tasks        {len(tasks)} abiertas",
+        f"modelo       Miliciano prioriza la bandeja diaria de trabajo humano",
     ])
 
     if session_id is not None:

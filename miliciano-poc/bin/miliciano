@@ -86,15 +86,51 @@ from miliciano_exec import *
 
 def main():
     if len(sys.argv) < 2:
-        cmd_shell()
+        cmd_home()
         return
 
     sub = sys.argv[1]
     arg = " ".join(sys.argv[2:]).strip()
     args = sys.argv[2:]
 
+    if sub in {"home", "start"}:
+        cmd_home()
+        return
+    if sub in {"day", "today"}:
+        cmd_day()
+        return
+    if sub == "about":
+        cmd_about()
+        return
+    if sub == "jobs":
+        cmd_jobs(args)
+        return
+    if sub in {"task", "tasks"}:
+        cmd_task(args)
+        return
     if sub == "status":
         cmd_status()
+        return
+    if sub == "ask":
+        if not arg:
+            print("Falta prompt para ask", file=sys.stderr)
+            sys.exit(1)
+        cmd_ask(arg)
+        return
+    if sub == "boundary":
+        if not arg:
+            print("Falta prompt para boundary", file=sys.stderr)
+            sys.exit(1)
+        cmd_boundary(arg)
+        return
+    if sub == "trace":
+        cmd_trace(args)
+        return
+    if sub == "mode":
+        cmd_mode(args)
+        return
+    if sub == "identity":
+        cmd_identity(args)
         return
     if sub == "model":
         cmd_model(args)

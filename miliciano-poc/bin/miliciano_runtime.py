@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,20 +21,15 @@ from textwrap import dedent, wrap
 from miliciano_ui import *
 
 
-MILICIANO_PREAMBLE = (
-    "Responde como Miliciano, tu partner tecnológico by Milytics. "
-    "No te presentes como Hermes salvo que te pregunten por la arquitectura interna. "
-    "Responde en español si el usuario habla en español. "
-    "Sé claro, ejecutivo, útil y orientado a la acción. "
-    "Optimiza tokens: responde corto, sin repetir ideas, sin introducciones innecesarias. "
-    "Usa solo el mínimo texto útil para resolver la tarea."
-)
+MILICIANO_PREAMBLE = None
 
 MILICIANO_HERMES_HOME = os.path.expanduser("~/.hermes/profiles/miliciano")
 MILICIANO_GLOBAL_HERMES_CONFIG = os.path.expanduser("~/.hermes/config.yaml")
 MILICIANO_PROFILE_CONFIG = os.path.join(MILICIANO_HERMES_HOME, "config.yaml")
 MILICIANO_STATE_DIR = os.path.expanduser("~/.config/miliciano")
 MILICIANO_STATE_PATH = os.path.join(MILICIANO_STATE_DIR, "config.json")
+MILICIANO_JOBS_PATH = os.path.join(MILICIANO_STATE_DIR, "jobs.json")
+MILICIANO_ORCHESTRATION_REPORT_PATH = os.path.join(MILICIANO_STATE_DIR, "orchestration-report.json")
 OPENCLAW_CONFIG_PATH = os.path.expanduser("~/.openclaw/openclaw.json")
 OPENCLAW_AUTH_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
 HERMES_AUTH_PATH = os.path.join(MILICIANO_HERMES_HOME, "auth.json")
@@ -45,6 +41,10 @@ DEFAULT_OPENCLAW_MODEL = "openai-codex/gpt-5.4"
 DEFAULT_LOCAL_HERMES_PROVIDER = "custom"
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_LOCAL_CONTEXT_LENGTH = 16384
+
+OUTPUT_MODES = {"simple", "operator", "debug"}
+ROUTE_MODES = {"cheap", "balanced", "max"}
+PERMISSION_MODES = {"plan", "ask", "accept-edits", "execute", "restricted-boundary"}
 
 ROUTE_ROLE_LABELS = {
     "reasoning": "motor principal de razonamiento",
@@ -96,6 +96,64 @@ PREREQ_COMMANDS = REQUIRED_SYSTEM_COMMANDS + OPTIONAL_SYSTEM_COMMANDS
 _STATE_CACHE = None
 _OLLAMA_STATUS_CACHE = None
 _PREFERRED_LOCAL_OLLAMA_MODEL_CACHE = None
+
+PERSONA_PRESETS = {
+    "operator": {
+        "label": "operator",
+        "tone": "directo, ejecutivo y orientado a resolver",
+        "style": "prioriza claridad, acción y seguimiento",
+    },
+    "guardian": {
+        "label": "guardian",
+        "tone": "calmado, confiable y muy cuidadoso con riesgo",
+        "style": "prioriza seguridad, validación y trazabilidad",
+    },
+    "builder": {
+        "label": "builder",
+        "tone": "creativo, técnico y obsesionado con construir",
+        "style": "prioriza iteración, diseño y shipping rápido",
+    },
+    "concierge": {
+        "label": "concierge",
+        "tone": "cercano, amable y resolutivo",
+        "style": "prioriza comodidad, guía y experiencia humana",
+    },
+}
+
+IDENTITY_ENV_VARS = {
+    "partner_name": "MILICIANO_PARTNER_NAME",
+    "persona_key": "MILICIANO_PERSONA",
+    "owner_name": "MILICIANO_OWNER_NAME",
+    "language": "MILICIANO_LANGUAGE",
+    "interaction_style": "MILICIANO_INTERACTION_STYLE",
+}
+
+
+def find_miliciano_project_file(start_dir=None):
+    current = os.path.abspath(start_dir or os.getcwd())
+    while True:
+        candidate = os.path.join(current, "MILICIANO.md")
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def load_miliciano_project_instructions(start_dir=None, max_lines=120, max_chars=5000):
+    path = find_miliciano_project_file(start_dir=start_dir)
+    if not path:
+        return {"path": None, "present": False, "content": ""}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()[:max_lines]
+    except Exception:
+        return {"path": path, "present": True, "content": ""}
+    content = "".join(lines).strip()
+    if len(content) > max_chars:
+        content = content[:max_chars].rstrip() + "\n..."
+    return {"path": path, "present": True, "content": content}
 
 
 def base_env():
@@ -287,6 +345,20 @@ def default_miliciano_state():
             "base_url": NVIDIA_BASE_URL,
             "model": NVIDIA_DEFAULT_MODEL,
         },
+        "preferences": {
+            "output_mode": "simple",
+            "route_mode": "balanced",
+            "permission_mode": "ask",
+        },
+        "identity": {
+            "partner_name": "Miliciano",
+            "persona_key": "operator",
+            "language": "es",
+            "interaction_style": "directo y útil",
+            "owner_name": None,
+        },
+        "jobs": {},
+        "tasks": {},
     }
 
 
@@ -325,6 +397,14 @@ def normalize_miliciano_state(state):
         state["ollama"] = {}
     if not isinstance(state.get("nvidia"), dict):
         state["nvidia"] = {}
+    if not isinstance(state.get("preferences"), dict):
+        state["preferences"] = {}
+    if not isinstance(state.get("identity"), dict):
+        state["identity"] = {}
+    if not isinstance(state.get("jobs"), dict):
+        state["jobs"] = {}
+    if not isinstance(state.get("tasks"), dict):
+        state["tasks"] = {}
 
     fallback = state.get("routing", {}).get("fallback")
     if isinstance(fallback, str) and fallback.startswith("nvidia/nvidia/"):
@@ -339,6 +419,22 @@ def normalize_miliciano_state(state):
         if current_fast in {None, "", reasoning_spec} and state.get("ollama", {}).get("auto_install", True):
             state["routing"]["fast"] = local_spec
         state["ollama"].setdefault("preferred_model", local_model_name)
+
+    prefs = state["preferences"]
+    if prefs.get("output_mode") not in OUTPUT_MODES:
+        prefs["output_mode"] = "simple"
+    if prefs.get("route_mode") not in ROUTE_MODES:
+        prefs["route_mode"] = "balanced"
+    if prefs.get("permission_mode") not in PERMISSION_MODES:
+        prefs["permission_mode"] = "ask"
+
+    identity = state["identity"]
+    identity.setdefault("partner_name", "Miliciano")
+    if identity.get("persona_key") not in PERSONA_PRESETS:
+        identity["persona_key"] = "operator"
+    identity.setdefault("language", "es")
+    identity.setdefault("interaction_style", "directo y útil")
+    identity.setdefault("owner_name", None)
 
     return state
 
@@ -402,6 +498,456 @@ def get_openclaw_selection():
 
 def get_route_selection(role):
     return load_miliciano_state().get("routing", {}).get(role)
+
+
+def _set_preference(name, value, allowed_values):
+    if value not in allowed_values:
+        raise ValueError(f"valor inválido para {name}: {value}")
+    state = load_miliciano_state(refresh=True)
+    state.setdefault("preferences", {})[name] = value
+    save_miliciano_state(state)
+    return value
+
+
+def get_output_mode():
+    return load_miliciano_state().get("preferences", {}).get("output_mode", "simple")
+
+
+def set_output_mode(mode):
+    return _set_preference("output_mode", mode, OUTPUT_MODES)
+
+
+def get_route_mode():
+    return load_miliciano_state().get("preferences", {}).get("route_mode", "balanced")
+
+
+def set_route_mode(mode):
+    return _set_preference("route_mode", mode, ROUTE_MODES)
+
+
+def get_permission_mode():
+    return load_miliciano_state().get("preferences", {}).get("permission_mode", "ask")
+
+
+def set_permission_mode(mode):
+    return _set_preference("permission_mode", mode, PERMISSION_MODES)
+
+
+def identity_env_defaults():
+    defaults = {}
+    for key, env_name in IDENTITY_ENV_VARS.items():
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            defaults[key] = value
+    return defaults
+
+
+def seed_partner_identity_from_env(persist=False):
+    state = load_miliciano_state(refresh=True)
+    identity = state.setdefault("identity", {})
+    defaults = identity_env_defaults()
+    changed = False
+    for key, value in defaults.items():
+        if key == "persona_key" and value not in PERSONA_PRESETS:
+            continue
+        if not identity.get(key):
+            identity[key] = value
+            changed = True
+    if changed or persist:
+        save_miliciano_state(state)
+    return get_partner_identity()
+
+
+def get_partner_identity():
+    state = load_miliciano_state()
+    identity = dict(state.get("identity", {}))
+    defaults = identity_env_defaults()
+    for key, value in defaults.items():
+        if key == "persona_key" and value not in PERSONA_PRESETS:
+            continue
+        identity.setdefault(key, value)
+    preset = PERSONA_PRESETS.get(identity.get("persona_key") or "operator", PERSONA_PRESETS["operator"])
+    identity["persona"] = preset
+    return identity
+
+
+def set_partner_identity(partner_name=None, persona_key=None, language=None, interaction_style=None, owner_name=None):
+    state = load_miliciano_state(refresh=True)
+    identity = state.setdefault("identity", {})
+    if partner_name is not None:
+        identity["partner_name"] = partner_name.strip() or "Miliciano"
+    if persona_key is not None:
+        if persona_key not in PERSONA_PRESETS:
+            raise ValueError(f"persona inválida: {persona_key}")
+        identity["persona_key"] = persona_key
+    if language is not None:
+        identity["language"] = language.strip() or "es"
+    if interaction_style is not None:
+        identity["interaction_style"] = interaction_style.strip() or "directo y útil"
+    if owner_name is not None:
+        identity["owner_name"] = owner_name.strip() or None
+    save_miliciano_state(state)
+    return get_partner_identity()
+
+
+def load_miliciano_jobs(refresh=False):
+    state = load_miliciano_state(refresh=refresh)
+    jobs = state.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        jobs = {}
+    return jobs
+
+
+def save_miliciano_jobs(jobs):
+    state = load_miliciano_state(refresh=True)
+    state["jobs"] = jobs or {}
+    save_miliciano_state(state)
+    return state["jobs"]
+
+
+def load_miliciano_tasks(refresh=False):
+    state = load_miliciano_state(refresh=refresh)
+    tasks = state.get("tasks") or {}
+    if not isinstance(tasks, dict):
+        tasks = {}
+    return tasks
+
+
+def save_miliciano_tasks(tasks):
+    state = load_miliciano_state(refresh=True)
+    state["tasks"] = tasks or {}
+    save_miliciano_state(state)
+    return state["tasks"]
+
+
+def create_miliciano_task(title, note="", status="pending", priority="medium"):
+    tasks = load_miliciano_tasks(refresh=True)
+    task_id = f"task-{uuid.uuid4().hex[:8]}"
+    tasks[task_id] = {
+        "id": task_id,
+        "title": (title or "Task Miliciano").strip(),
+        "note": (note or "").strip(),
+        "status": status if status in {"pending", "in_progress", "completed", "cancelled"} else "pending",
+        "priority": priority if priority in {"low", "medium", "high"} else "medium",
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "done_at": None,
+    }
+    save_miliciano_tasks(tasks)
+    return tasks[task_id]
+
+
+def update_miliciano_task(task_id, **fields):
+    tasks = load_miliciano_tasks(refresh=True)
+    task = tasks.get(task_id)
+    if not task:
+        raise KeyError(task_id)
+    for key, value in fields.items():
+        if value is not None:
+            task[key] = value
+    task["updated_at"] = int(time.time())
+    if task.get("status") in {"completed", "cancelled"} and not task.get("done_at"):
+        task["done_at"] = int(time.time())
+    tasks[task_id] = task
+    save_miliciano_tasks(tasks)
+    return task
+
+
+def remove_miliciano_task(task_id):
+    tasks = load_miliciano_tasks(refresh=True)
+    if task_id not in tasks:
+        return False
+    tasks.pop(task_id, None)
+    save_miliciano_tasks(tasks)
+    return True
+
+
+def list_miliciano_tasks():
+    tasks = load_miliciano_tasks()
+    return [tasks[k] for k in sorted(tasks.keys())]
+
+
+def list_open_miliciano_tasks():
+    return [task for task in list_miliciano_tasks() if task.get("status") not in {"completed", "cancelled"}]
+
+
+def summarize_miliciano_task(task):
+    return f"{task.get('id')} · {task.get('status')} · {task.get('priority')} · {task.get('title')}"
+
+
+def task_priority_score(task):
+    priority = task.get("priority") or "medium"
+    status = task.get("status") or "pending"
+    priority_score = {"high": 0, "medium": 1, "low": 2}.get(priority, 1)
+    status_score = {"in_progress": 0, "pending": 1, "cancelled": 2, "completed": 3}.get(status, 1)
+    return (status_score, priority_score, task.get("created_at") or 0)
+
+
+def sort_open_miliciano_tasks(tasks=None):
+    tasks = tasks if tasks is not None else list_open_miliciano_tasks()
+    return sorted(tasks, key=task_priority_score)
+
+
+def complete_miliciano_task(task_id):
+    return update_miliciano_task(task_id, status="completed")
+
+
+def cron_field_matches(field, value, min_value, max_value):
+
+    if field in {"*", "?"}:
+        return True
+    if field.startswith("*/"):
+        try:
+            step = int(field[2:])
+            return step > 0 and value % step == 0
+        except ValueError:
+            return False
+
+    matched = False
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part == "*":
+            return True
+        if "/" in part:
+            base, step_text = part.split("/", 1)
+            try:
+                step = int(step_text)
+            except ValueError:
+                continue
+            if step <= 0:
+                continue
+            if base == "*":
+                if value % step == 0:
+                    matched = True
+            elif "-" in base:
+                start_text, end_text = base.split("-", 1)
+                try:
+                    start = int(start_text)
+                    end = int(end_text)
+                except ValueError:
+                    continue
+                if start <= value <= end and (value - start) % step == 0:
+                    matched = True
+            else:
+                try:
+                    start = int(base)
+                except ValueError:
+                    continue
+                if value >= start and (value - start) % step == 0:
+                    matched = True
+            continue
+        if "-" in part:
+            try:
+                start_text, end_text = part.split("-", 1)
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError:
+                continue
+            if start <= value <= end:
+                matched = True
+            continue
+        try:
+            if int(part) == value:
+                matched = True
+        except ValueError:
+            continue
+    return matched
+
+
+def parse_schedule_spec(schedule):
+    schedule = (schedule or "").strip().lower()
+    if not schedule:
+        return {"kind": "manual", "raw": schedule}
+    if schedule.startswith("every "):
+        body = schedule[6:].strip()
+        match = re.fullmatch(r"(\d+)\s*([mhd])", body)
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            multiplier = {"m": 60, "h": 3600, "d": 86400}[unit]
+            return {"kind": "interval", "seconds": amount * multiplier, "raw": schedule}
+    if re.fullmatch(r"(\d+)\s*([mhd])", schedule):
+        amount = int(re.fullmatch(r"(\d+)\s*([mhd])", schedule).group(1))
+        unit = re.fullmatch(r"(\d+)\s*([mhd])", schedule).group(2)
+        multiplier = {"m": 60, "h": 3600, "d": 86400}[unit]
+        return {"kind": "interval", "seconds": amount * multiplier, "raw": schedule}
+
+    parts = schedule.split()
+    if len(parts) == 5:
+        return {"kind": "cron", "fields": parts, "raw": schedule}
+    return {"kind": "manual", "raw": schedule}
+
+
+def schedule_due(job, now_ts=None):
+    now = datetime.fromtimestamp(now_ts or time.time(), tz=timezone.utc).astimezone()
+    spec = parse_schedule_spec(job.get("schedule"))
+    last_run_at = job.get("last_run_at")
+    if spec["kind"] == "manual":
+        return False
+    if spec["kind"] == "interval":
+        if last_run_at is None:
+            return True
+        return (now.timestamp() - float(last_run_at)) >= spec["seconds"]
+    if spec["kind"] == "cron":
+        minute, hour, dom, month, dow = spec["fields"]
+        cron_dow = (now.weekday() + 1) % 7
+        if not (
+            cron_field_matches(minute, now.minute, 0, 59)
+            and cron_field_matches(hour, now.hour, 0, 23)
+            and cron_field_matches(dom, now.day, 1, 31)
+            and cron_field_matches(month, now.month, 1, 12)
+            and cron_field_matches(dow, cron_dow, 0, 7)
+        ):
+            return False
+        if last_run_at is None:
+            return True
+        last = datetime.fromtimestamp(float(last_run_at), tz=timezone.utc).astimezone()
+        return not (
+            last.year == now.year
+            and last.month == now.month
+            and last.day == now.day
+            and last.hour == now.hour
+            and last.minute == now.minute
+        )
+    return False
+
+
+def create_miliciano_job(title, schedule, prompt, target="ask", enabled=True, repeat=None):
+    jobs = load_miliciano_jobs(refresh=True)
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    jobs[job_id] = {
+        "id": job_id,
+        "title": (title or "Job Miliciano").strip(),
+        "schedule": (schedule or "").strip(),
+        "prompt": (prompt or "").strip(),
+        "target": target,
+        "enabled": bool(enabled),
+        "repeat": repeat,
+        "created_at": int(time.time()),
+        "last_run_at": None,
+        "last_status": None,
+        "last_result": None,
+    }
+    save_miliciano_jobs(jobs)
+    return jobs[job_id]
+
+
+def update_miliciano_job(job_id, **fields):
+    jobs = load_miliciano_jobs(refresh=True)
+    job = jobs.get(job_id)
+    if not job:
+        raise KeyError(job_id)
+    for key, value in fields.items():
+        if value is not None:
+            job[key] = value
+    jobs[job_id] = job
+    save_miliciano_jobs(jobs)
+    return job
+
+
+def remove_miliciano_job(job_id):
+    jobs = load_miliciano_jobs(refresh=True)
+    if job_id not in jobs:
+        return False
+    jobs.pop(job_id, None)
+    save_miliciano_jobs(jobs)
+    return True
+
+
+def list_miliciano_jobs():
+    jobs = load_miliciano_jobs()
+    return [jobs[k] for k in sorted(jobs.keys())]
+
+
+def list_due_miliciano_jobs(now_ts=None):
+    return [job for job in list_miliciano_jobs() if job.get("enabled", True) and schedule_due(job, now_ts=now_ts)]
+
+
+def render_job_summary(job):
+    status = "on" if job.get("enabled") else "off"
+    return f"{job.get('id')} · {status} · {job.get('schedule') or 'sin cron'} · {job.get('title') or 'sin título'}"
+
+
+def run_miliciano_job(job_id):
+    from miliciano_exec import orchestrate_partner_request
+
+    jobs = load_miliciano_jobs(refresh=True)
+    job = jobs.get(job_id)
+    if not job:
+        raise KeyError(job_id)
+    target = (job.get("target") or "ask").lower()
+    prompt = job.get("prompt") or job.get("title") or ""
+    if not prompt:
+        raise ValueError("job sin prompt")
+    if target == "exec":
+        rc, clean, _ = orchestrate_partner_request(prompt, force_mode="execution")
+    elif target == "mission":
+        rc, clean, _ = orchestrate_partner_request(prompt, force_mode="hybrid")
+    elif target == "boundary":
+        rc, clean, _ = orchestrate_partner_request(prompt, force_mode="external")
+    elif target == "think":
+        rc, clean, _ = orchestrate_partner_request(prompt, force_mode="reasoning")
+    else:
+        rc, clean, _ = orchestrate_partner_request(prompt)
+    job["last_run_at"] = int(time.time())
+    job["last_status"] = rc
+    job["last_result"] = clean
+    jobs[job_id] = job
+    save_miliciano_jobs(jobs)
+    return rc, clean, job
+
+
+def run_due_miliciano_jobs(now_ts=None, limit=None):
+    due = list_due_miliciano_jobs(now_ts=now_ts)
+    results = []
+    for job in due[: limit or len(due)]:
+        try:
+            rc, clean, updated = run_miliciano_job(job["id"])
+            results.append({"id": job["id"], "title": job.get("title"), "rc": rc, "output": clean, "job": updated})
+        except Exception as exc:
+            results.append({"id": job["id"], "title": job.get("title"), "rc": 1, "output": str(exc), "job": job})
+    return results
+
+
+def scheduler_loop(interval_seconds=60, quiet=False):
+    interval_seconds = max(10, int(interval_seconds or 60))
+    while True:
+        results = run_due_miliciano_jobs()
+        if results and not quiet:
+            for result in results:
+                title = result.get("title") or result["id"]
+                print(f"[scheduler] {title}: rc={result['rc']}")
+                if result.get("output"):
+                    print(result["output"])
+        time.sleep(interval_seconds)
+
+
+def render_partner_preamble():
+    identity = get_partner_identity()
+    persona = identity.get("persona") or PERSONA_PRESETS["operator"]
+    partner_name = identity.get("partner_name") or "Miliciano"
+    owner_name = identity.get("owner_name")
+    owner_line = f"Tu operador principal es {owner_name}. " if owner_name else ""
+    language = identity.get("language") or "es"
+    language_line = "Responde en español. " if language.startswith("es") else "Respond in English. "
+    interaction_style = identity.get("interaction_style") or "directo y útil"
+    return (
+        f"Responde como {partner_name}, un partner tecnológico by Milytics. "
+        "No te presentes como Hermes salvo que te pregunten por la arquitectura interna. "
+        f"{language_line}"
+        f"Tu tono debe ser {persona['tone']}. "
+        f"Tu estilo operativo debe ser {persona['style']}. "
+        f"Tu estilo de interacción debe sentirse {interaction_style}. "
+        f"{owner_line}"
+        "Optimiza tokens: responde corto, sin repetir ideas, sin introducciones innecesarias. "
+        "Usa solo el mínimo texto útil para resolver la tarea."
+    )
+
+
+def get_miliciano_preamble():
+    return render_partner_preamble()
 
 
 def sync_hermes_profile_config(provider, model):
@@ -551,6 +1097,210 @@ def split_provider_model(spec, fallback_provider=None):
     raise ValueError("usa el formato provider/modelo o especifica un provider actual")
 
 
+def build_orchestration_decision(intent, target, reason, needs_execution=False, needs_policy=False, needs_external=False):
+    return {
+        "intent": intent,
+        "target": target,
+        "reason": reason,
+        "needs_execution": needs_execution,
+        "needs_policy": needs_policy,
+        "needs_external": needs_external,
+    }
+
+
+def build_policy_result(verdict, reason, requires_confirmation=False, mode=None, next_step=None, allowed_actions=None):
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "requires_confirmation": requires_confirmation,
+        "mode": mode,
+        "next_step": next_step,
+        "allowed_actions": allowed_actions or [],
+    }
+
+
+def build_execution_report(target, outcome, summary, verified=False):
+    return {
+        "target": target,
+        "outcome": outcome,
+        "summary": summary,
+        "verified": verified,
+    }
+
+
+def detect_sensitive_action(prompt):
+    text = (prompt or "").lower()
+    markers = [
+        "sudo",
+        "rm -rf",
+        "delete",
+        "borrar",
+        "credential",
+        "secret",
+        "token",
+        "api key",
+        "expose",
+        "publish",
+        "webhook",
+        "deploy",
+        "firewall",
+    ]
+    return [marker for marker in markers if marker in text]
+
+
+def detect_externalization_intent(prompt):
+    text = (prompt or "").lower()
+    markers = [
+        "extern",
+        "afuera",
+        "public",
+        "webhook",
+        "agent",
+        "servicio",
+        "service",
+        "whatsapp",
+        "telegram",
+        "discord",
+        "expose",
+        "endpoint",
+        "api pública",
+    ]
+    return [marker for marker in markers if marker in text]
+
+
+def classify_orchestration_intent(prompt, forced_mode=None):
+    if forced_mode in {"reasoning", "execution", "hybrid", "external"}:
+        return build_orchestration_decision(
+            intent=forced_mode,
+            target=("hermes" if forced_mode == "reasoning" else "openclaw" if forced_mode == "execution" else "hybrid" if forced_mode == "hybrid" else "nemoclaw"),
+            reason=f"modo forzado: {forced_mode}",
+            needs_execution=forced_mode in {"execution", "hybrid"},
+            needs_policy=forced_mode in {"execution", "hybrid", "external"},
+            needs_external=forced_mode == "external",
+        )
+
+    text = (prompt or "").strip().lower()
+    external_hits = detect_externalization_intent(text)
+    sensitive_hits = detect_sensitive_action(text)
+    reasoning_hits = [kw for kw in REASONING_ROUTE_KEYWORDS if kw in text]
+
+    if external_hits:
+        return build_orchestration_decision(
+            intent="external",
+            target="nemoclaw",
+            reason=f"detecté intención outward/external ({external_hits[0]})",
+            needs_execution=True,
+            needs_policy=True,
+            needs_external=True,
+        )
+    if sensitive_hits:
+        return build_orchestration_decision(
+            intent="hybrid",
+            target="openclaw",
+            reason=f"detecté acción sensible ({sensitive_hits[0]})",
+            needs_execution=True,
+            needs_policy=True,
+            needs_external=False,
+        )
+    if reasoning_hits or len(text) > 280:
+        return build_orchestration_decision(
+            intent="reasoning",
+            target="hermes",
+            reason=f"detecté tarea de razonamiento ({reasoning_hits[0] if reasoning_hits else 'prompt largo'})",
+            needs_execution=False,
+            needs_policy=False,
+            needs_external=False,
+        )
+    simple_route, simple_reason = choose_route_for_prompt(text)
+    if simple_route == "fast":
+        return build_orchestration_decision(
+            intent="reasoning",
+            target="hermes",
+            reason=simple_reason,
+            needs_execution=False,
+            needs_policy=False,
+            needs_external=False,
+        )
+    return build_orchestration_decision(
+        intent="hybrid" if any(word in text for word in ["haz", "ejecuta", "run", "crea", "make", "instala", "configura"]) else "reasoning",
+        target="openclaw" if any(word in text for word in ["haz", "ejecuta", "run", "crea", "make", "instala", "configura"]) else "hermes",
+        reason="clasificación por defecto de Miliciano",
+        needs_execution=any(word in text for word in ["haz", "ejecuta", "run", "crea", "make", "instala", "configura"]),
+        needs_policy=any(word in text for word in ["haz", "ejecuta", "run", "crea", "make", "instala", "configura"]),
+        needs_external=False,
+    )
+
+
+def evaluate_policy_for_prompt(prompt, decision):
+    text = (prompt or "").lower()
+    sensitive_hits = detect_sensitive_action(text)
+    permission_mode = get_permission_mode()
+    allow_reasoning_only = ["reasoning", "read", "status", "trace"]
+
+    if permission_mode == "plan":
+        if decision.get("needs_execution") or decision.get("needs_external"):
+            return build_policy_result(
+                "deny",
+                "modo plan: solo permito análisis; cambia a `miliciano mode permission execute` o `ask` para ejecutar",
+                requires_confirmation=True,
+                mode=permission_mode,
+                next_step="cambia a un modo con ejecución habilitada",
+                allowed_actions=allow_reasoning_only,
+            )
+        return build_policy_result("allow", "modo plan: reasoning permitido, ejecución bloqueada", False, mode=permission_mode, allowed_actions=allow_reasoning_only)
+
+    if permission_mode == "restricted-boundary" and decision.get("needs_external"):
+        return build_policy_result(
+            "deny",
+            "modo restricted-boundary: la salida al exterior está bloqueada hasta aprobación explícita",
+            requires_confirmation=True,
+            mode=permission_mode,
+            next_step="usa boundary con aprobación explícita o cambia el modo de permisos",
+            allowed_actions=["reasoning", "local execution"],
+        )
+
+    if permission_mode == "accept-edits" and (decision.get("needs_external") or any(hit in text for hit in ["run", "ejecuta", "instala", "deploy", "webhook", "sudo"])):
+        return build_policy_result(
+            "ask",
+            "modo accept-edits: permito edición/plan, pero comandos o acciones outward requieren aprobación",
+            requires_confirmation=True,
+            mode=permission_mode,
+            next_step="confirma la acción o cambia a execute si confías en este entorno",
+            allowed_actions=["reasoning", "file edits"],
+        )
+
+    if any(marker in text for marker in ["rm -rf /", "wipe disk", "format disk"]):
+        return build_policy_result("deny", "acción destructiva clara; requiere revisión humana", requires_confirmation=True, mode=permission_mode)
+    if decision.get("needs_external"):
+        return build_policy_result("ask", "la tarea quiere salir al exterior; requiere boundary/policy antes de ejecutar", requires_confirmation=True, mode=permission_mode, next_step="revisa boundary y confirma exposición")
+    if sensitive_hits:
+        return build_policy_result("ask", f"detecté operación sensible ({sensitive_hits[0]})", requires_confirmation=True, mode=permission_mode, next_step="confirma la acción sensible antes de seguir")
+    return build_policy_result("allow", "sin señales de riesgo crítico en esta fase", requires_confirmation=False, mode=permission_mode)
+
+
+def load_last_orchestration_report():
+    return read_json_file(MILICIANO_ORCHESTRATION_REPORT_PATH) or {}
+
+
+def save_orchestration_report(decision=None, policy=None, execution=None):
+    current = load_last_orchestration_report()
+    if decision is not None:
+        current["decision"] = decision
+    if policy is not None:
+        current["policy"] = policy
+    if execution is not None:
+        current["execution"] = execution
+    write_json_file(MILICIANO_ORCHESTRATION_REPORT_PATH, current)
+    return current
+
+
+def update_orchestration_report(**fields):
+    current = load_last_orchestration_report()
+    current.update(fields)
+    write_json_file(MILICIANO_ORCHESTRATION_REPORT_PATH, current)
+    return current
+
+
 def detect_quota_signal(text):
     normalized = (text or "").lower()
     markers = [
@@ -572,11 +1322,11 @@ def collect_hermes_model_status():
     auth = read_json_file(HERMES_AUTH_PATH) or {}
     active_provider = auth.get("active_provider") or provider
     provider_entry = (auth.get("providers") or {}).get(active_provider, {})
-    tokens = provider_entry.get("tokens") or {}
-    payload = decode_jwt_payload(tokens.get("access_token"))
-    auth_claims = payload.get("https://api.openai.com/auth", {})
     pool = (auth.get("credential_pool") or {}).get(active_provider, [])
     last_profile = pool[0] if pool else {}
+    access_token = last_profile.get("access_token") or (provider_entry.get("tokens") or {}).get("access_token")
+    payload = decode_jwt_payload(access_token)
+    auth_claims = payload.get("https://api.openai.com/auth", {})
     quota_exhausted = detect_quota_signal(last_profile.get("last_error_message")) or (
         (last_profile.get("last_status") or "").lower() not in {"", "ok"}
         and detect_quota_signal(last_profile.get("last_error_reason") or last_profile.get("last_status"))
@@ -587,6 +1337,7 @@ def collect_hermes_model_status():
         "active_provider": active_provider,
         "auth_mode": provider_entry.get("auth_mode"),
         "plan": auth_claims.get("chatgpt_plan_type"),
+        "email": payload.get("email") or (payload.get("https://api.openai.com/profile", {}) or {}).get("email"),
         "expires_at": payload.get("exp"),
         "last_refresh": provider_entry.get("last_refresh"),
         "request_count": last_profile.get("request_count"),
@@ -801,6 +1552,48 @@ def collect_nvidia_status():
     }
 
 
+def probe_reasoning_path():
+    from shutil import which
+    if which("hermes") is None:
+        return {"ok": False, "kind": "error", "summary": "Hermes no está instalado"}
+    provider, model = get_hermes_selection()
+    return {"ok": True, "kind": "ready", "summary": f"reasoning disponible con {provider}/{model}"}
+
+
+def probe_execution_path():
+    from shutil import which
+    if which("openclaw") is None:
+        return {"ok": False, "kind": "error", "summary": "OpenClaw no está instalado"}
+    health = run(["openclaw", "health", "--json"], capture=True, timeout=6)
+    out = (health.stdout or "").strip()
+    ok = bool(health.returncode == 0 and '"ok":true' in out.lower().replace(" ", ""))
+    if ok:
+        return {"ok": True, "kind": "ready", "summary": "gateway y ejecución base responden"}
+    return {"ok": False, "kind": "pending", "summary": "gateway OpenClaw no confirmó salud end-to-end"}
+
+
+def probe_local_path():
+    status = collect_ollama_status()
+    local_model = preferred_local_ollama_model()
+    if not status.get("path"):
+        return {"ok": False, "kind": "pending", "summary": "Ollama no está instalado"}
+    if not status.get("api_ok"):
+        return {"ok": False, "kind": "pending", "summary": status.get("api_detail") or "API local no responde"}
+    if not local_model:
+        return {"ok": False, "kind": "pending", "summary": "no hay modelo local preferido en Ollama"}
+    return {"ok": True, "kind": "ready", "summary": f"local fast path listo con {local_model}"}
+
+
+def probe_boundary_path():
+    from shutil import which
+    if which("nemoclaw") is None:
+        return {"ok": False, "kind": "pending", "summary": "Nemoclaw no está instalado"}
+    res = run(["nemoclaw", "--version"], capture=True, timeout=6)
+    if res.returncode != 0:
+        return {"ok": False, "kind": "error", "summary": "Nemoclaw está presente pero no operativo"}
+    return {"ok": True, "kind": "info", "summary": "boundary base disponible; outward workflow completo sigue pendiente"}
+
+
 
 
 def recommend_ollama_models(hardware):
@@ -906,6 +1699,63 @@ def choose_route_for_prompt(prompt):
     return "reasoning", "por defecto uso la ruta principal remota"
 
 
+def resolve_route_mode_for_prompt(prompt):
+    return get_route_mode()
+
+
+def apply_route_mode_override(route, prompt, forced_role=None):
+    if forced_role:
+        route["reason"] = f"{route['reason']} · respeté la ruta forzada"
+        return route
+
+    mode = resolve_route_mode_for_prompt(prompt)
+    text = (prompt or "").strip().lower()
+    local_spec = get_route_selection("local")
+    fast_spec = get_route_selection("fast")
+    simple_fast = bool(fast_spec) and (
+        any(kw in text for kw in FAST_ROUTE_KEYWORDS) or len(text.split()) <= 18 or len(text) <= 140
+    )
+
+    if mode == "cheap":
+        if simple_fast and fast_spec:
+            provider, model = parse_hermes_route_spec(fast_spec)
+            return {
+                "role": "fast",
+                "provider": provider,
+                "model": model,
+                "spec": fast_spec,
+                "reason": f"modo cheap: prioricé velocidad/costo con la ruta fast ({fast_spec})",
+            }
+        if local_spec and route["role"] == "reasoning" and len(text) <= 220:
+            provider, model = parse_hermes_route_spec(local_spec)
+            return {
+                "role": "local",
+                "provider": provider,
+                "model": model,
+                "spec": local_spec,
+                "reason": f"modo cheap: preferí la base local ({local_spec}) para evitar costo premium",
+            }
+        route["reason"] = f"{route['reason']} · modo cheap mantuvo la mejor ruta disponible"
+        return route
+
+    if mode == "max":
+        reasoning_spec = get_route_selection("reasoning")
+        if reasoning_spec and route["role"] in {"fast", "local"}:
+            provider, model = parse_hermes_route_spec(reasoning_spec)
+            return {
+                "role": "reasoning",
+                "provider": provider,
+                "model": model,
+                "spec": reasoning_spec,
+                "reason": f"modo max: escalé a reasoning premium para máxima calidad",
+            }
+        route["reason"] = f"{route['reason']} · modo max conservó reasoning principal"
+        return route
+
+    route["reason"] = f"{route['reason']} · modo balanced"
+    return route
+
+
 def resolve_hermes_route_for_prompt(prompt, forced_role=None):
     state = load_miliciano_state()
     requested_role = forced_role or choose_route_for_prompt(prompt)[0]
@@ -921,13 +1771,14 @@ def resolve_hermes_route_for_prompt(prompt, forced_role=None):
         spec = state.get("routing", {}).get("reasoning") or make_model_spec(state["hermes"]["provider"], state["hermes"]["model"])
         reason = f"{reason}; faltaba ruta {requested_role}, vuelvo a reasoning"
     provider, model = parse_hermes_route_spec(spec)
-    return {
+    route = {
         "role": role,
         "provider": provider,
         "model": model,
         "spec": spec,
         "reason": reason,
     }
+    return apply_route_mode_override(route, prompt, forced_role=forced_role)
 
 
 def sync_openclaw_fallback_route(state=None):

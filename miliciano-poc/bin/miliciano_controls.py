@@ -59,6 +59,27 @@ def print_model_overview():
     print(f"{DIM}Miliciano ya no piensa en un solo modelo: guarda rutas por rol y deja el local como base/fallback.{RESET}")
     print(f"{DIM}Nemoclaw aún no está integrado al camino de inferencia; el valor se guarda como reserva.{RESET}")
 
+
+def print_mode_overview():
+    panel("MODOS ACTIVOS", [
+        f"output       {get_output_mode()}",
+        f"route        {get_route_mode()}",
+        f"permission   {get_permission_mode()}",
+    ])
+    print("Uso:")
+    print("  miliciano mode")
+    print("  miliciano mode output simple")
+    print("  miliciano mode output operator")
+    print("  miliciano mode output debug")
+    print("  miliciano mode route cheap")
+    print("  miliciano mode route balanced")
+    print("  miliciano mode route max")
+    print("  miliciano mode permission plan")
+    print("  miliciano mode permission ask")
+    print("  miliciano mode permission accept-edits")
+    print("  miliciano mode permission execute")
+    print("  miliciano mode permission restricted-boundary")
+
 def set_hermes_model(spec, update_route=True):
     provider, model = resolve_hermes_model_spec(spec)
     state = load_miliciano_state()
@@ -183,6 +204,39 @@ def cmd_route(args):
     print("Usa: show | set | use | sync", file=sys.stderr)
     sys.exit(1)
 
+def collect_codex_oauth_alignment(hermes_auth, openclaw_auth):
+    hermes_entry = ((hermes_auth.get("credential_pool") or {}).get("openai-codex") or [{}])[0]
+    openclaw_entry = (openclaw_auth.get("profiles") or {}).get("openai-codex:default") or {}
+
+    hermes_payload = decode_jwt_payload(hermes_entry.get("access_token")) if hermes_entry.get("access_token") else {}
+    openclaw_payload = decode_jwt_payload(openclaw_entry.get("access")) if openclaw_entry.get("access") else {}
+
+    hermes_auth_claims = hermes_payload.get("https://api.openai.com/auth", {})
+    openclaw_auth_claims = openclaw_payload.get("https://api.openai.com/auth", {})
+    hermes_profile = hermes_payload.get("https://api.openai.com/profile", {})
+    openclaw_profile = openclaw_payload.get("https://api.openai.com/profile", {})
+
+    hermes_email = hermes_payload.get("email") or hermes_profile.get("email")
+    openclaw_email = openclaw_payload.get("email") or openclaw_profile.get("email")
+    hermes_account = hermes_auth_claims.get("chatgpt_account_id")
+    openclaw_account = openclaw_auth_claims.get("chatgpt_account_id")
+    aligned = bool(hermes_account and openclaw_account and hermes_account == openclaw_account)
+
+    if hermes_account or openclaw_account:
+        reason = "alineadas" if aligned else "desalineadas: Hermes y OpenClaw usan cuentas OAuth distintas"
+    else:
+        reason = "sin datos suficientes para comparar cuentas OAuth"
+
+    return {
+        "aligned": aligned,
+        "reason": reason,
+        "hermes_email": hermes_email,
+        "openclaw_email": openclaw_email,
+        "hermes_account": hermes_account,
+        "openclaw_account": openclaw_account,
+    }
+
+
 def collect_auth_overview():
     hermes_auth = read_json_file(HERMES_AUTH_PATH) or {}
     hermes_pool = hermes_auth.get("credential_pool") or {}
@@ -235,6 +289,7 @@ def collect_auth_overview():
         "hermes_rows": hermes_rows,
         "openclaw_rows": openclaw_rows,
         "env_rows": env_rows,
+        "codex_alignment": collect_codex_oauth_alignment(hermes_auth, openclaw_auth),
     }
 
 def print_auth_overview():
@@ -266,6 +321,15 @@ def print_auth_overview():
         [
             f"{row['provider']:<12} {status_badge('ready' if row['present'] else 'pending')}  {row['env']}"
             for row in overview['env_rows']
+        ],
+    )
+    codex_alignment = overview.get("codex_alignment") or {}
+    panel(
+        "COHERENCIA OAUTH CODEX",
+        [
+            f"estado        {status_badge('ready' if codex_alignment.get('aligned') else 'warn')}  {codex_alignment.get('reason') or 'n/d'}",
+            f"Hermes        {codex_alignment.get('hermes_email') or 'n/d'}",
+            f"OpenClaw      {codex_alignment.get('openclaw_email') or 'n/d'}",
         ],
     )
     print("Uso:")
@@ -472,5 +536,88 @@ def cmd_model(args):
 
     print(f"Objetivo de modelo desconocido: {target}", file=sys.stderr)
     print("Usa: hermes | openclaw | all | nemoclaw", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_mode(args):
+    banner()
+    if not args or args[0] in {"show", "status", "list"}:
+        print_mode_overview()
+        return
+
+    if len(args) != 2:
+        print("Uso: miliciano mode <output|route|permission> <valor>", file=sys.stderr)
+        sys.exit(1)
+
+    family = args[0].lower()
+    value = args[1].strip().lower()
+    try:
+        if family == "output":
+            set_output_mode(value)
+        elif family == "route":
+            set_route_mode(value)
+        elif family == "permission":
+            set_permission_mode(value)
+        else:
+            print(f"Familia de modo desconocida: {family}", file=sys.stderr)
+            sys.exit(1)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    print_mode_overview()
+
+
+def print_identity_overview():
+    identity = get_partner_identity()
+    panel("IDENTIDAD DEL PARTNER", [
+        f"nombre        {identity.get('partner_name') or 'Miliciano'}",
+        f"persona       {identity.get('persona_key')}",
+        f"tono          {(identity.get('persona') or {}).get('tone')}",
+        f"estilo        {identity.get('interaction_style')}",
+        f"idioma        {identity.get('language')}",
+        f"operador      {identity.get('owner_name') or 'n/d'}",
+    ])
+    print("Milio-first: la identidad del partner define cómo responde Miliciano, sin depender de Hermes como interfaz principal.")
+    print("Uso:")
+    print("  miliciano identity")
+    print("  miliciano identity set-name <nombre>")
+    print("  miliciano identity set-persona <operator|guardian|builder|concierge>")
+    print("  miliciano identity set-owner <nombre>")
+    print("  miliciano identity set-style <estilo>")
+    print("  miliciano identity set-language <es|en|...>")
+
+
+def cmd_identity(args):
+    banner()
+    if not args or args[0] in {"show", "status", "list"}:
+        print_identity_overview()
+        return
+
+    action = args[0].lower()
+    if action == 'set-name':
+        set_partner_identity(partner_name=' '.join(args[1:]).strip())
+        print_identity_overview()
+        return
+    if action == 'set-persona':
+        value = ' '.join(args[1:]).strip().lower()
+        set_partner_identity(persona_key=value)
+        print_identity_overview()
+        return
+    if action == 'set-owner':
+        set_partner_identity(owner_name=' '.join(args[1:]).strip())
+        print_identity_overview()
+        return
+    if action == 'set-style':
+        set_partner_identity(interaction_style=' '.join(args[1:]).strip())
+        print_identity_overview()
+        return
+    if action == 'set-language':
+        set_partner_identity(language=' '.join(args[1:]).strip())
+        print_identity_overview()
+        return
+
+    print(f"Acción de identity desconocida: {action}", file=sys.stderr)
+    print("Usa: show | set-name | set-persona | set-owner | set-style | set-language", file=sys.stderr)
     sys.exit(1)
 
