@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import base64
+import codecs
 import html
 import json
 import os
 import platform
+import pty
 import re
+import select
 import subprocess
 import sys
 import threading
@@ -227,10 +230,77 @@ def run_with_spinner(cmd, label, env=None):
     return subprocess.CompletedProcess(cmd, proc.returncode, out or "", None)
 
 
-def run_openclaw_agent(message):
-    res = run_with_spinner(["openclaw", "agent", "--agent", "main", "--message", message], "Ejecutando con OpenClaw")
+def run_with_live_output(cmd, label, env=None):
+    effective_env = env or base_env()
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=effective_env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    chunks = []
+    buffer = ""
+    label_printed = False
+    try:
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if master_fd in ready:
+                try:
+                    data = os.read(master_fd, 1024)
+                except OSError:
+                    data = b""
+                if not data:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                text = decoder.decode(data)
+                if text:
+                    if not label_printed:
+                        print(rule(f" Miliciano · {label} ", "─"), flush=True)
+                        label_printed = True
+                    chunks.append(text)
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+            if proc.poll() is not None and not ready:
+                break
+        remainder = decoder.decode(b"", final=True)
+        if remainder:
+            chunks.append(remainder)
+            sys.stdout.write(remainder)
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+    out = "".join(chunks)
+    if label_printed and not out.endswith("\n"):
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, None)
+
+
+def run_openclaw_agent(message, stream_output=False):
+    runner = run_with_live_output if stream_output else run_with_spinner
+    res = runner(["openclaw", "agent", "--agent", "main", "--message", message], "Ejecutando con OpenClaw")
     out = (res.stdout or "").strip()
-    print(out)
+    if not stream_output:
+        print(out)
     bad_markers = [
         "FailoverError:",
         "No API key found for provider",

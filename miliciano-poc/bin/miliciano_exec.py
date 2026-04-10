@@ -8,9 +8,9 @@ from miliciano_obsidian import *
 from miliciano_ui import *
 
 
-def stream_local_ollama_response(model, local_prompt, route):
+def stream_local_ollama_response(model, local_prompt, route, stream_output=False):
     width = terminal_width()
-    stream_visible = get_output_mode() == "debug"
+    stream_visible = stream_output or get_output_mode() == "debug"
     if stream_visible:
         print(rule(f" Miliciano · {route['role']} ", "─", width))
         sys.stdout.write("  ")
@@ -72,7 +72,7 @@ def stream_local_ollama_response(model, local_prompt, route):
     return 0, strip_terminal_noise("".join(chunks))
 
 
-def call_local_ollama_query(prompt, route, session_id=None):
+def call_local_ollama_query(prompt, route, session_id=None, stream_output=False):
     need("ollama")
     model = route["model"]
     local_prompt = (
@@ -81,7 +81,7 @@ def call_local_ollama_query(prompt, route, session_id=None):
         f"Responde de forma breve y útil.\n\n"
         f"Usuario: {prompt}"
     )
-    rc, clean = stream_local_ollama_response(model, local_prompt, route)
+    rc, clean = stream_local_ollama_response(model, local_prompt, route, stream_output=stream_output)
     if rc == 0:
         return rc, strip_terminal_noise(clean), session_id
     res = run_with_spinner(["ollama", "run", model, local_prompt], f"Pensando como Miliciano · {route['role']}")
@@ -159,7 +159,7 @@ def _fallback_route_from_state(state):
     }
 
 
-def call_hermes_query(prompt, session_id=None, forced_role=None):
+def call_hermes_query(prompt, session_id=None, forced_role=None, stream_output=False):
     state = load_miliciano_state()
     route = resolve_hermes_route_for_prompt(prompt, forced_role=forced_role)
     provider = route["provider"]
@@ -169,7 +169,7 @@ def call_hermes_query(prompt, session_id=None, forced_role=None):
     if project.get("present") and project.get("content"):
         project_block = f"\n\nInstrucciones activas desde MILICIANO.md ({project['path']}):\n{project['content']}"
     if provider == "custom":
-        rc, clean, sid = call_local_ollama_query(prompt, route, session_id=session_id)
+        rc, clean, sid = call_local_ollama_query(prompt, route, session_id=session_id, stream_output=stream_output)
         save_obsidian_memory(prompt, clean, route=route, source="consulta", session_id=sid)
         return rc, clean, sid
     if provider == "nvidia":
@@ -189,7 +189,8 @@ def call_hermes_query(prompt, session_id=None, forced_role=None):
     if session_id:
         cmd.extend(["--resume", session_id])
     spinner_label = f"Pensando como Miliciano · {route['role']}"
-    res = run_with_spinner(cmd, spinner_label)
+    runner = run_with_live_output if stream_output else run_with_spinner
+    res = runner(cmd, spinner_label)
     out = (res.stdout or "")
     new_session_id = session_id
     clean_lines = []
@@ -244,7 +245,7 @@ def call_hermes_query(prompt, session_id=None, forced_role=None):
     if should_try_fallback:
         fallback_provider = fallback_route["provider"]
         if fallback_provider == "custom":
-            rc, clean, sid = call_local_ollama_query(prompt, fallback_route, session_id=session_id)
+            rc, clean, sid = call_local_ollama_query(prompt, fallback_route, session_id=session_id, stream_output=stream_output)
             save_obsidian_memory(prompt, clean, route=fallback_route, source="consulta", session_id=sid)
             return rc, clean, sid
         if fallback_provider == "nvidia":
@@ -381,9 +382,9 @@ def format_partner_response(decision, plan_text, exec_out, verification, force_m
 
 
 def cmd_boundary(prompt):
-    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="external")
-    if clean:
-        response_box(clean, title="Miliciano · boundary")
+    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="external", stream_output=True)
+    if clean and get_output_mode() != "debug":
+        print()
     sys.exit(rc)
 
 
@@ -436,7 +437,7 @@ def run_nemoclaw_boundary_action(prompt, decision):
     return 0, summary, None
 
 
-def run_execution_with_openclaw(prompt, plan_text=None):
+def run_execution_with_openclaw(prompt, plan_text=None, stream_output=False):
     identity = get_partner_identity()
     preamble = (
         f"Eres {identity.get('partner_name') or 'Miliciano'}, el ejecutor operativo de Miliciano by Milytics. "
@@ -445,17 +446,17 @@ def run_execution_with_openclaw(prompt, plan_text=None):
     full_prompt = f"{preamble}\n\nTarea: {prompt}"
     if plan_text:
         full_prompt += f"\n\nPlan de Hermes:\n{plan_text}"
-    rc, out = run_openclaw_agent(full_prompt)
+    rc, out = run_openclaw_agent(full_prompt, stream_output=stream_output)
     return rc, out, None
 
 
-def orchestrate_partner_request(prompt, session_id=None, force_mode=None):
+def orchestrate_partner_request(prompt, session_id=None, force_mode=None, stream_output=False):
     decision = classify_orchestration_intent(prompt, forced_mode=force_mode)
     policy = evaluate_policy_for_prompt(prompt, decision)
     save_orchestration_report(decision=decision, policy=policy)
 
     if decision["intent"] == "reasoning" and decision["target"] == "hermes":
-        rc, clean, sid = call_hermes_query(prompt, session_id=session_id)
+        rc, clean, sid = call_hermes_query(prompt, session_id=session_id, stream_output=stream_output)
         report = build_execution_report("hermes", "passed" if rc == 0 else "failed", clean or "sin salida", verified=(rc == 0))
         save_orchestration_report(execution=report)
         return rc, clean, sid
@@ -491,7 +492,7 @@ def orchestrate_partner_request(prompt, session_id=None, force_mode=None):
 
     Sé concreto y orientado a ejecución.
     """).strip()
-    planning_rc, plan_text, planning_sid = call_hermes_query(planning_prompt, session_id=session_id, forced_role="reasoning")
+    planning_rc, plan_text, planning_sid = call_hermes_query(planning_prompt, session_id=session_id, forced_role="reasoning", stream_output=stream_output)
     plan_text = normalize_plan_text(plan_text)
     active_sid = planning_sid or session_id
     if planning_rc != 0 or not plan_text:
@@ -499,7 +500,7 @@ def orchestrate_partner_request(prompt, session_id=None, force_mode=None):
         save_orchestration_report(execution=report)
         return planning_rc or 1, plan_text or "Hermes no pudo planificar la tarea", active_sid
 
-    rc, exec_out, _ = run_execution_with_openclaw(prompt, plan_text=plan_text)
+    rc, exec_out, _ = run_execution_with_openclaw(prompt, plan_text=plan_text, stream_output=stream_output)
     verification = verify_execution_result(prompt, exec_out)
     verification["summary"] = normalize_verification_summary(verification.get("summary"))
     summary = format_partner_response(decision, plan_text, exec_out, verification, force_mode=force_mode)
@@ -508,9 +509,9 @@ def orchestrate_partner_request(prompt, session_id=None, force_mode=None):
 
 
 def cmd_ask(prompt):
-    rc, clean, _ = orchestrate_partner_request(prompt)
-    if clean:
-        response_box(clean)
+    rc, clean, _ = orchestrate_partner_request(prompt, stream_output=True)
+    if clean and get_output_mode() != "debug":
+        print()
     sys.exit(rc)
 
 
@@ -543,11 +544,11 @@ def interactive_chat():
             raw_prompt = raw_prompt[11:].strip()
         if forced_role in {"fast", "reasoning"}:
             mapped_force = "reasoning" if forced_role == "reasoning" else None
-            rc, clean, session_id = orchestrate_partner_request(raw_prompt, session_id=session_id, force_mode=mapped_force)
+            rc, clean, session_id = orchestrate_partner_request(raw_prompt, session_id=session_id, force_mode=mapped_force, stream_output=True)
         else:
-            rc, clean, session_id = orchestrate_partner_request(raw_prompt, session_id=session_id)
-        if clean:
-            response_box(clean)
+            rc, clean, session_id = orchestrate_partner_request(raw_prompt, session_id=session_id, stream_output=True)
+        if clean and get_output_mode() != "debug":
+            print()
         if rc != 0:
             print(f"[salida {rc}] revisión de la última respuesta")
 
@@ -865,20 +866,20 @@ def cmd_think(prompt):
     if raw_prompt.startswith("--reasoning "):
         force_mode = "reasoning"
         raw_prompt = raw_prompt[12:].strip()
-    rc, clean, _ = orchestrate_partner_request(raw_prompt, force_mode=force_mode)
-    if clean:
-        response_box(clean)
+    rc, clean, _ = orchestrate_partner_request(raw_prompt, force_mode=force_mode, stream_output=True)
+    if clean and get_output_mode() != "debug":
+        print()
     sys.exit(rc)
 
 def cmd_exec(prompt):
-    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="execution")
-    if clean:
-        response_box(clean)
+    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="execution", stream_output=True)
+    if clean and get_output_mode() != "debug":
+        print()
     sys.exit(rc)
 
 def cmd_mission(prompt):
-    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="hybrid")
-    if clean:
-        response_box(clean)
+    rc, clean, _ = orchestrate_partner_request(prompt, force_mode="hybrid", stream_output=True)
+    if clean and get_output_mode() != "debug":
+        print()
     sys.exit(rc)
 
