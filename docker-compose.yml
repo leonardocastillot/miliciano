@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  miliciano:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: miliciano
+    hostname: miliciano
+
+    environment:
+      # API Keys (pass from host environment or .env file)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+
+      # Miliciano configuration
+      - MILICIANO_DEBUG=${MILICIANO_DEBUG:-0}
+      - OBSIDIAN_VAULT_PATH=/data/vault
+      - MILICIANO_OBSIDIAN_PORT=8765
+
+      # Nemoclaw policy
+      - NEMOCLAW_POLICY_MODE=${NEMOCLAW_POLICY_MODE:-enforce}
+
+    volumes:
+      # Persistent data
+      - miliciano-config:/home/miliciano/.config/miliciano
+      - miliciano-hermes:/home/miliciano/.hermes
+      - miliciano-openclaw:/home/miliciano/.openclaw
+      - miliciano-nemoclaw:/home/miliciano/.nemoclaw
+
+      # Obsidian vault (optional)
+      - ${OBSIDIAN_VAULT_PATH:-./data/vault}:/data/vault
+
+      # Logs (optional, for easy access from host)
+      - ${MILICIANO_LOGS_PATH:-./logs}:/home/miliciano/.config/miliciano/logs
+
+    ports:
+      # Obsidian graph HTTP interface
+      - "${MILICIANO_PORT:-8765}:8765"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "miliciano", "status", "--json"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource limits (optional, uncomment to enable)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 2048M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 512M
+
+volumes:
+  miliciano-config:
+    driver: local
+  miliciano-hermes:
+    driver: local
+  miliciano-openclaw:
+    driver: local
+  miliciano-nemoclaw:
+    driver: local
+
+networks:
+  default:
+    name: miliciano-network

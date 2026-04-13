@@ -1,6 +1,6 @@
 {
   "name": "@milytics/miliciano",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Miliciano CLI by Milytics",
   "license": "MIT",
   "type": "commonjs",
@@ -8,16 +8,19 @@
     "miliciano": "bin/miliciano.js"
   },
   "files": [
+    "README.md",
+    "CHANGELOG.md",
     "bin/miliciano.js",
     "miliciano-poc/bin/miliciano",
-    "miliciano-poc/bin/miliciano_controls.py",
-    "miliciano-poc/bin/miliciano_exec.py",
-    "miliciano-poc/bin/miliciano_obsidian.py",
-    "miliciano-poc/bin/miliciano_runtime.py",
-    "miliciano-poc/bin/miliciano_setup.py",
-    "miliciano-poc/bin/miliciano_status.py",
-    "miliciano-poc/bin/miliciano_ui.py"
+    "miliciano-poc/bin/*.py",
+    "miliciano-poc/config/"
   ],
+  "scripts": {
+    "prepublishOnly": "npm run verify:package",
+    "test": "cd miliciano-poc && python3 -m pytest ../tests/ -v",
+    "verify:package": "node scripts/verify-package.js",
+    "version": "npm version patch && git push --follow-tags"
+  },
   "engines": {
     "node": ">=18"
   },

@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Miliciano Configuration Schema",
+  "description": "JSON schema for Miliciano configuration validation",
+  "type": "object",
+  "required": ["hermes", "openclaw"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+      "description": "Configuration version"
+    },
+    "hermes": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["openai-codex", "openai", "anthropic", "openrouter", "groq", "google", "mistral", "nvidia", "custom"],
+          "description": "Hermes reasoning provider"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model name for reasoning"
+        }
+      }
+    },
+    "openclaw": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+/[a-zA-Z0-9._:-]+$",
+          "description": "Model spec in format provider/model"
+        }
+      }
+    },
+    "nemoclaw": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": ["string", "null"],
+          "description": "Nemoclaw model (optional)"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Nemoclaw policy enforcement"
+        },
+        "policy_path": {
+          "type": "string",
+          "description": "Path to policy configuration file"
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "properties": {
+        "reasoning": {
+          "type": "string",
+          "description": "Model for reasoning route"
+        },
+        "execution": {
+          "type": "string",
+          "description": "Model for execution route"
+        },
+        "fast": {
+          "type": "string",
+          "description": "Model for fast route (local)"
+        },
+        "local": {
+          "type": "string",
+          "description": "Model for local route"
+        },
+        "fallback": {
+          "type": "string",
+          "description": "Fallback model"
+        }
+      }
+    },
+    "ollama": {
+      "type": "object",
+      "properties": {
+        "preferred_model": {
+          "type": "string",
+          "description": "Preferred Ollama model"
+        },
+        "auto_install": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-install Ollama models"
+        }
+      }
+    },
+    "nvidia": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable NVIDIA provider"
+        },
+        "api_key_present": {
+          "type": "boolean",
+          "description": "Whether NVIDIA API key is configured"
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "NVIDIA API base URL"
+        },
+        "model": {
+          "type": "string",
+          "description": "NVIDIA model name"
+        }
+      }
+    }
+  }
+}

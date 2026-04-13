@@ -1,464 +1,66 @@
 #!/usr/bin/env python3
 import os
-import shlex
-import subprocess
 import sys
-import time
 from pathlib import Path
 from shutil import which
 
-from miliciano_runtime import *
-from miliciano_ui import *
-from miliciano_obsidian import *
+from miliciano_agent import run_shell
+from miliciano_constants import MILICIANO_HERMES_HOME, NVIDIA_BASE_URL, NVIDIA_DEFAULT_MODEL
+from miliciano_obsidian import collect_obsidian_status
+from miliciano_shell_input import shell_runtime_status
+from miliciano_runtime import (
+    PREREQ_COMMANDS,
+    collect_nvidia_status,
+    collect_ollama_status,
+    load_miliciano_state,
+    pull_ollama_model,
+    run,
+    save_miliciano_state,
+)
+from miliciano_setup_local import ensure_ollama_ready
+from miliciano_setup_interactive import (
+    maybe_configure_nvidia,
+    maybe_resolve_openclaw_auth,
+    maybe_review_nemoclaw,
+)
+from miliciano_setup_support import (
+    TRUSTED_SOURCES,
+    current_local_stack_snapshot,
+    detect_openclaw_auth_state,
+    download_and_verify_script,
+    ensure_miliciano_soul,
+    ensure_policy_config,
+    repair_core_stack,
+    repair_nemoclaw_wrapper,
+    start_openclaw_gateway_detached,
+    wait_for_openclaw_gateway_ready,
+)
+from miliciano_ui import (
+    BOLD,
+    RESET,
+    SOFT,
+    VIOLET,
+    YELLOW,
+    activity_line,
+    banner,
+    split_columns,
+    status_badge,
+)
+from miliciano_validators import validate_install_url, ValidationError
+from textwrap import wrap
 
-def build_miliciano_soul(identity):
-    partner_name = identity.get("partner_name") or "Miliciano"
-    persona = identity.get("persona") or PERSONA_PRESETS[identity.get("persona_key") or "operator"]
-    owner_name = identity.get("owner_name") or "su operador principal"
-    interaction_style = identity.get("interaction_style") or "directo y útil"
-    language = identity.get("language") or "es"
-    return f"""# {partner_name} SOUL
-
-Perfil vivo del partner tecnológico instalado.
-
-- Producto: Miliciano
-- Marca: Milytics
-- Nombre del partner: {partner_name}
-- Persona base: {persona['label']}
-- Tono: {persona['tone']}
-- Estilo operativo: {persona['style']}
-- Estilo de interacción: {interaction_style}
-- Idioma por defecto: {language}
-- Operador principal: {owner_name}
-- Objetivo: ayudar a pensar, ejecutar y dejar trazabilidad con criterio
-- Estado: este archivo se crea o repara durante setup/repair
-"""
-
-
-def ensure_miliciano_soul(profile_dir, force=False):
-    profile_dir = Path(profile_dir)
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    soul_path = profile_dir / "SOUL.md"
-    identity = get_partner_identity()
-    soul_text = build_miliciano_soul(identity)
-    if soul_path.exists() and not force:
-        return False, f"SOUL.md presente en {soul_path}"
-    soul_path.write_text(soul_text, encoding="utf-8")
-    activity_line("SOUL.md creado/actualizado", str(soul_path))
-    return True, f"SOUL.md sincronizado en {soul_path}"
-
-
-def repair_nemoclaw_wrapper():
-    wrapper = Path.home() / ".local" / "bin" / "nemoclaw"
-    npm_prefix_res = run(["npm", "prefix", "-g"], capture=True, timeout=10)
-    npm_prefix = (npm_prefix_res.stdout or "").strip().splitlines()[-1].strip() if npm_prefix_res and npm_prefix_res.returncode == 0 else ""
-    npm_global_bin = Path(npm_prefix) / "bin" if npm_prefix else None
-    global_candidate = (npm_global_bin / "nemoclaw") if npm_global_bin else None
-
-    if not global_candidate or not global_candidate.exists():
-        if wrapper.exists():
-            return False, f"No detecté binario global de Nemoclaw para reparar {wrapper}"
-        return False, "No detecté una instalación global de Nemoclaw"
-
-    wrapper.parent.mkdir(parents=True, exist_ok=True)
-    wrapper_content = """#!/usr/bin/env bash
-set -euo pipefail
-if command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm prefix -g 2>/dev/null | tail -n 1)"
-  if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/nemoclaw" ]; then
-    exec "$NPM_PREFIX/bin/nemoclaw" "$@"
-  fi
-fi
-if command -v nemoclaw >/dev/null 2>&1; then
-  exec "$(command -v nemoclaw)" "$@"
-fi
-printf '[Nemoclaw] existe instalación, pero no está expuesta correctamente en PATH.\\n' >&2
-exit 1
-"""
-    wrapper.write_text(wrapper_content, encoding="utf-8")
-    os.chmod(wrapper, 0o755)
-    activity_line("Wrapper de Nemoclaw reparado", str(wrapper))
-    return True, f"Wrapper recreado en {wrapper}"
-
-
-
-
-def ensure_profile_env_link():
-    root_env = Path.home() / ".hermes" / ".env"
-    profile_env = Path(MILICIANO_HERMES_HOME) / ".env"
-    if profile_env.exists() or profile_env.is_symlink():
-        return False, f".env del perfil presente en {profile_env}"
-    if not root_env.exists():
-        return False, f"No encontré ~/.hermes/.env para enlazar hacia {profile_env}"
-    profile_env.parent.mkdir(parents=True, exist_ok=True)
-    profile_env.symlink_to(root_env)
-    activity_line(".env del perfil enlazado", str(profile_env))
-    return True, f".env del perfil enlazado a {root_env}"
-
-def repair_core_stack():
-    state = load_miliciano_state(refresh=True)
-    actions = []
-
-    hermes_provider = state["hermes"]["provider"]
-    hermes_model = state["hermes"]["model"]
-    sync_hermes_global_config(hermes_provider, hermes_model)
-    sync_hermes_profile_config(hermes_provider, hermes_model)
-    actions.append(f"Hermes sincronizado en {hermes_provider}/{hermes_model}")
-
-    profile_dir = Path(MILICIANO_HERMES_HOME)
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    if Path(MILICIANO_HERMES_HOME).exists() and not Path(MILICIANO_HERMES_HOME).joinpath("SOUL.md").exists():
-        created, detail = ensure_miliciano_soul(profile_dir)
-        actions.append(detail)
-    else:
-        ensure_miliciano_soul(profile_dir, force=True)
-        actions.append(f"SOUL.md presente en {Path(MILICIANO_HERMES_HOME) / 'SOUL.md'}")
-
-    openclaw_path = which("openclaw")
-    if openclaw_path:
-        current_model = state["openclaw"]["model"]
-        run(["openclaw", "models", "set", current_model], capture=True, timeout=12)
-        ok, detail = sync_openclaw_fallback_route(state)
-        actions.append(f"OpenClaw alineado a {current_model}")
-        actions.append(detail)
-    else:
-        actions.append("OpenClaw no instalado; no pude re-alinear execution/fallback")
-
-    linked_env, env_detail = ensure_profile_env_link()
-    actions.append(env_detail)
-
-    repaired, nemo_detail = repair_nemoclaw_wrapper()
-    actions.append(nemo_detail)
-    if repaired or linked_env:
-        activity_line("Repair completado", "Nemoclaw / configs / fallback")
-    return actions
-
-
-def parse_setup_args(args):
-    options = {
-        "auto_mode": False,
-        "dry_run": False,
-        "unknown_args": [],
-    }
-    for arg in args or []:
-        if arg in {"--auto", "--yes", "-y", "--non-interactive"}:
-            options["auto_mode"] = True
-        elif arg in {"--dry-run", "--plan"}:
-            options["dry_run"] = True
-        else:
-            options["unknown_args"].append(arg)
-    return options
-
-
-def run_shell_command(command, timeout=None):
-    return run(["bash", "-lc", command], capture=True, timeout=timeout)
-
-def ensure_local_bin_in_process_path():
-    local_bin = str(Path.home() / ".local" / "bin")
-    path_value = os.environ.get("PATH", "")
-    parts = path_value.split(":") if path_value else []
-    if local_bin not in parts:
-        os.environ["PATH"] = f"{local_bin}:{path_value}" if path_value else local_bin
-    return local_bin
-
-
-
-
-def auto_install_component(command_name, label, env_prefix, default_cmd=None, box_line=None, timeout=1800):
-    ensure_local_bin_in_process_path()
-    if which(command_name) is not None:
-        return True, f"{label} ya estaba instalado"
-
-    install_cmd = os.environ.get(f"{env_prefix}_INSTALL_CMD", "").strip()
-    install_url = os.environ.get(f"{env_prefix}_INSTALL_URL", "").strip()
-    if not install_cmd and install_url:
-        install_cmd = f"curl -fsSL {shlex.quote(install_url)} | bash"
-    if not install_cmd:
-        install_cmd = default_cmd or ""
-    if not install_cmd:
-        return False, f"No hay instalador automático de {label} configurado (usa {env_prefix}_INSTALL_CMD o {env_prefix}_INSTALL_URL)"
-    if box_line:
-        box_line(f"• Auto-instalando {label}")
-    install = run_shell_command(install_cmd, timeout=timeout)
-    ensure_local_bin_in_process_path()
-    if which(command_name) is not None:
-        activity_line(f"{label} instalado desde setup", env_prefix)
-        return True, f"{label} instalado automáticamente"
-    out = (install.stdout or "").strip()
-    suffix = f" ({out.splitlines()[-1]})" if out else ""
-    return False, f"Intenté instalar {label}, pero no quedó en PATH{suffix}"
-
-
-def resolve_ollama_download_url():
-    env_url = os.environ.get("MILICIANO_OLLAMA_INSTALL_URL", "").strip()
-    if env_url:
-        return env_url
-
-    import platform
-    machine = platform.machine().lower()
-    if machine in {"x86_64", "amd64"}:
-        asset = "ollama-linux-amd64.tar.zst"
-    elif machine in {"aarch64", "arm64"}:
-        asset = "ollama-linux-arm64.tar.zst"
-    else:
-        return None
-    return f"https://github.com/ollama/ollama/releases/latest/download/{asset}"
-
-
-def auto_install_hermes(box_line=None):
-    return auto_install_component("hermes", "Hermes", "MILICIANO_HERMES", box_line=box_line)
-
-
-def auto_install_openclaw(box_line=None):
-    return auto_install_component("openclaw", "OpenClaw", "MILICIANO_OPENCLAW", default_cmd="npm install -g openclaw", box_line=box_line)
-
-
-def auto_install_nemoclaw(box_line=None):
-    return auto_install_component("nemoclaw", "Nemoclaw", "MILICIANO_NEMOCLAW", default_cmd="npm install -g nemoclaw", box_line=box_line)
-
-
-def auto_install_ollama(box_line=None):
-    ensure_local_bin_in_process_path()
-    if which("ollama") is not None:
-        return True, "Ollama ya estaba instalado"
-
-    env_cmd = os.environ.get("MILICIANO_OLLAMA_INSTALL_CMD", "").strip()
-    if env_cmd:
-        return auto_install_component("ollama", "Ollama", "MILICIANO_OLLAMA", box_line=box_line)
-
-    download_url = resolve_ollama_download_url()
-    if not download_url:
-        return False, "No pude determinar un binario de Ollama para esta arquitectura; usa MILICIANO_OLLAMA_INSTALL_CMD o MILICIANO_OLLAMA_INSTALL_URL"
-
-    missing = [cmd for cmd in ("curl", "tar", "zstd") if which(cmd) is None]
-    if missing:
-        return False, f"Para instalar Ollama en modo user-space faltan: {', '.join(missing)}"
-
-    local_root = Path.home() / ".local"
-    local_root.mkdir(parents=True, exist_ok=True)
-    if box_line:
-        box_line("• Auto-instalando Ollama en ~/.local")
-    install_cmd = f"mkdir -p {shlex.quote(str(local_root))} && curl -fsSL {shlex.quote(download_url)} | zstd -d | tar -xf - -C {shlex.quote(str(local_root))}"
-    install = run_shell_command(install_cmd, timeout=1800)
-    ensure_local_bin_in_process_path()
-    if which("ollama") is not None or (local_root / 'bin' / 'ollama').exists():
-        activity_line("Ollama instalado en modo user-space", str(local_root / 'bin' / 'ollama'))
-        return True, f"Ollama instalado automáticamente desde {download_url}"
-    out = (install.stdout or "").strip()
-    suffix = f" ({out.splitlines()[-1]})" if out else ""
-    return False, f"Intenté instalar Ollama, pero no quedó disponible{suffix}"
-
-
-def auto_start_ollama_service():
-    if which("ollama") is None:
-        return False, "Ollama no instalado"
-    before = collect_ollama_status(refresh=True)
-    if before["api_ok"]:
-        return True, "API local ya estaba arriba"
-    try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=base_env(),
-            start_new_session=True,
-        )
-    except Exception as exc:
-        return False, f"No pude iniciar `ollama serve`: {exc}"
-    for _ in range(10):
-        time.sleep(1)
-        current = collect_ollama_status(refresh=True)
-        if current["api_ok"]:
-            return True, "API local levantada durante este setup"
-    return False, "Arranqué `ollama serve`, pero la API local no respondió a tiempo"
-
-
-def auto_configure_openclaw_auth_from_env():
-    env_key = os.environ.get("OPENAI_API_KEY")
-    if not env_key or which("openclaw") is None:
-        return False, "No encontré OPENAI_API_KEY para configurar OpenClaw automáticamente"
-    auth_cmd = (
-        "python3 - <<'PY'\n"
-        "import os, pty, sys\n"
-        "pid, fd = pty.fork()\n"
-        "if pid == 0:\n"
-        "    os.execvp('openclaw', ['openclaw','models','auth','paste-token','--provider','openai'])\n"
-        "buf = b''\n"
-        "token = (os.environ.get('OPENAI_API_KEY','') + '\\n').encode()\n"
-        "sent = False\n"
-        "while True:\n"
-        "    try:\n"
-        "        data = os.read(fd, 1024)\n"
-        "    except OSError:\n"
-        "        break\n"
-        "    if not data:\n"
-        "        break\n"
-        "    os.write(1, data)\n"
-        "    buf += data.lower()\n"
-        "    if (b'token' in buf or b'paste' in buf or b'api key' in buf) and not sent:\n"
-        "        os.write(fd, token)\n"
-        "        sent = True\n"
-        "_, status = os.waitpid(pid, 0)\n"
-        "sys.exit(os.waitstatus_to_exitcode(status))\n"
-        "PY"
-    )
-    auth_run = run(["bash", "-lc", auth_cmd])
-    probe = run(["openclaw", "agent", "--agent", "main", "--message", "Responde solo OK"], capture=True, timeout=20)
-    out = (probe.stdout or "")
-    ok = probe.returncode == 0 and "No API key found for provider" not in out and "FailoverError:" not in out
-    if ok:
-        activity_line("OpenClaw auth configurada desde OPENAI_API_KEY", "main agent")
-        return True, "Auth de OpenClaw configurada automáticamente"
-    auth_out = (auth_run.stdout or "").strip()
-    suffix = f" ({auth_out.splitlines()[-1]})" if auth_out else ""
-    return False, f"Intenté configurar auth automática, pero sigue pendiente{suffix}"
-
-
-
-
-def print_install_followups(box_line):
-    hermes_present = which("hermes") is not None
-    openclaw_present = which("openclaw") is not None
-    nemoclaw_present = which("nemoclaw") is not None
-    ollama_present = which("ollama") is not None
-
-    box_line("Resumen de follow-ups operativos:")
-    if not hermes_present:
-        box_line("- Hermes sigue pendiente: define MILICIANO_HERMES_INSTALL_CMD o instala Hermes antes de usar el stack.")
-    if openclaw_present:
-        auth_store_path = Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
-        auth_store_text = auth_store_path.read_text() if auth_store_path.exists() else ""
-        model_status = run(["openclaw", "models", "status", "--plain"], capture=True, timeout=10)
-        current_model = (model_status.stdout or "").strip()
-        auth_ok = bool(auth_store_text.strip()) and bool(current_model)
-        if not auth_ok:
-            box_line("- OpenClaw necesita auth útil para ejecutar agentes; usa `miliciano auth add openclaw <provider>` o exporta OPENAI_API_KEY.")
-    else:
-        box_line("- OpenClaw sigue pendiente: define un hook o deja que bootstrap use `npm install -g openclaw`.")
-    if not nemoclaw_present:
-        box_line("- Nemoclaw sigue pendiente: instala con `npm install -g nemoclaw` o usa el hook MILICIANO_NEMOCLAW_INSTALL_CMD.")
-    if ollama_present:
-        ollama_status = collect_ollama_status(refresh=True)
-        if not ollama_status["api_ok"]:
-            box_line("- Ollama está instalado pero la API local no responde; ejecuta `ollama serve` o reintenta `miliciano setup --auto`.")
-        elif not ollama_status["models"]:
-            recos = recommend_ollama_models(collect_local_ai_hardware())
-            box_line(f"- Ollama está arriba pero sin modelos; recomendado: `ollama pull {recos[0][0]}`.")
-    else:
-        box_line("- Ollama sigue pendiente: bootstrap puede instalarlo en ~/.local si tienes curl, tar y zstd.")
-
-
-def save_install_report(source, payload):
-    report = {
-        "source": source,
-        **payload,
-    }
-    write_json_file(os.path.join(MILICIANO_STATE_DIR, "install-report.json"), report)
-
-def cmd_bootstrap(args=None):
-    options = parse_setup_args(args)
-    auto_mode = options["auto_mode"]
-    dry_run = options["dry_run"]
-    unknown_args = options["unknown_args"]
-    ensure_local_bin_in_process_path()
-
-    GREEN = "[38;5;84m"
-    YELLOW = "[38;5;221m"
-    BOX_WIDTH = 74
-
-    def box_top(title="BOOTSTRAP MILICIANO", subtitle="Instalación integral del stack"):
-        print(f"{VIOLET}{'═' * BOX_WIDTH}{RESET}")
-        print(split_columns(f"{BOLD}{title}{RESET}", f"{SOFT}{subtitle}{RESET}", BOX_WIDTH))
-        print(f"{VIOLET}{'─' * BOX_WIDTH}{RESET}")
-
-    def box_rule():
-        print(f"{VIOLET}{'─' * BOX_WIDTH}{RESET}")
-
-    def box_line(text=""):
-        lines = wrap(text, width=BOX_WIDTH) if text else [""]
-        for line in lines:
-            print(line)
-
-    def box_bottom():
-        print(f"{VIOLET}{'═' * BOX_WIDTH}{RESET}")
-
-    banner()
-    box_top()
-    if unknown_args:
-        box_line(f"Aviso: ignorando argumentos no reconocidos: {' '.join(unknown_args)}")
-    if auto_mode:
-        box_line("Modo auto activo: bootstrap intentará dejar el stack listo sin pedir confirmación.")
-    else:
-        box_line("Bootstrap corre en modo opinionated: instala lo repetitivo y luego delega a `setup --auto`.")
-    if dry_run:
-        box_line("Dry-run activo: solo mostraré el plan de instalación, sin tocar el sistema.")
-    box_rule()
-    box_line("Fase 1 · validando prerequisitos base")
-
-    runtime = basic_runtime_status()
-    missing_required = [cmd for cmd in REQUIRED_SYSTEM_COMMANDS if not runtime[cmd]["path"]]
-    for cmd in REQUIRED_SYSTEM_COMMANDS:
-        status = f"OK · {runtime[cmd]['version'] or 'instalado'}" if runtime[cmd]["path"] else "FALTA"
-        box_line(f"- {cmd}: {status}")
-    if missing_required:
-        box_rule()
-        box_line(f"No puedo bootstrappear completo sin estos prerequisitos: {', '.join(missing_required)}")
-        box_line("Instálalos primero y luego reintenta `miliciano bootstrap`.")
-        box_bottom()
-        return
-
-    box_rule()
-    box_line("Fase 2 · instalando componentes del stack")
-    installers = [
-        ("Hermes", "hermes", auto_install_hermes),
-        ("OpenClaw", "openclaw", auto_install_openclaw),
-        ("Nemoclaw", "nemoclaw", auto_install_nemoclaw),
-        ("Ollama", "ollama", auto_install_ollama),
-    ]
-    install_results = []
-    for label, command_name, installer in installers:
-        if which(command_name):
-            detail = f"{label} ya estaba instalado"
-            install_results.append((label, True, detail))
-            box_line(f"- {label}: {GREEN}LISTO{RESET} · {detail}")
-            continue
-        if dry_run:
-            detail = f"Dry-run: intentaría instalar {label}"
-            install_results.append((label, False, detail))
-            box_line(f"- {label}: {YELLOW}PLAN{RESET} · {detail}")
-            continue
-        ok, detail = installer(box_line=box_line)
-        install_results.append((label, ok, detail))
-        status = GREEN + 'LISTO' + RESET if ok else YELLOW + 'PENDIENTE' + RESET
-        box_line(f"- {label}: {status} · {detail}")
-
-    box_rule()
-    box_line("Fase 3 · convergiendo a setup final")
-    if dry_run:
-        box_line("Dry-run: aquí ejecutaría `miliciano setup --auto` para cerrar la convergencia del stack.")
-        print_install_followups(box_line)
-        save_install_report("bootstrap", {
-            "mode": "dry-run",
-            "runtime": runtime,
-            "missing_required": missing_required,
-            "install_results": install_results,
-        })
-        box_bottom()
-        return
-    box_line("Voy a ejecutar `miliciano setup --auto` para reparar config, levantar servicios y cerrar el estado final.")
-    print_install_followups(box_line)
-    save_install_report("bootstrap", {
-        "mode": "apply",
-        "runtime": runtime,
-        "missing_required": missing_required,
-        "install_results": install_results,
-    })
-    box_bottom()
-    cmd_setup(["--auto"])
 
 def cmd_setup(args=None):
     from pathlib import Path
     from shutil import which
+
+    args = args or []
+    dry_run = "--dry-run" in args
+    auto_mode = (
+        any(flag in args for flag in {"--auto", "--yes", "-y", "--noninteractive"})
+        or os.environ.get("MILICIANO_SETUP_AUTO", "0").strip().lower() in {"1", "true", "yes", "on"}
+        or not (sys.stdin.isatty() and sys.stdout.isatty())
+    )
 
     GREEN = "\033[38;5;84m"
     YELLOW = "\033[38;5;221m"
@@ -492,14 +94,8 @@ def cmd_setup(args=None):
         box_rule()
         box_line(f"PASO {n}. {title}")
 
-    options = parse_setup_args(args)
-    auto_mode = options["auto_mode"]
-    dry_run = options["dry_run"]
-    unknown_args = options["unknown_args"]
-    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not auto_mode and not dry_run
-
     def ask_yes_no(question, default=True):
-        if not interactive:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return False
         suffix = " [Y/n] " if default else " [y/N] "
         while True:
@@ -516,92 +112,53 @@ def cmd_setup(args=None):
                 return False
             print("Responde y/s o n.")
 
-    def ask_text(question, default=""):
-        if not interactive:
-            return default
-        try:
-            answer = input(f"{question} [{default}] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return default
-        return answer or default
-
     banner()
     box_top("SETUP MILICIANO", "Ctrl+C para salir del setup")
-    if unknown_args:
-        box_line(f"Aviso: ignorando argumentos no reconocidos: {' '.join(unknown_args)}")
-    if auto_mode:
-        box_line("Modo auto activo: Miliciano intentará instalar/arrancar lo que pueda sin pedir confirmación.")
-        box_rule()
-    if dry_run:
-        box_line("Dry-run activo: revisaré el stack y te mostraré qué intentaría hacer, sin aplicar cambios.")
-        box_rule()
     box_line("Setup de Miliciano")
     box_line("Este comando revisa el stack, aplica lo que puede automáticamente y, si lo corres otra vez, te dice qué ya estaba instalado y qué falta.")
+    if dry_run:
+        box_line("Modo dry-run: mostraré diagnóstico y reparaciones previstas sin cambiar el sistema.")
     box_rule()
     box_line("Cargando información del entorno...")
-    if dry_run:
-        box_line("• Dry-run: omito repair_core_stack y solo inspecciono estado/configuración")
-    else:
-        box_line("• Reparando configuración base de Miliciano")
-        for action in repair_core_stack():
-            box_line(f"• {action}")
+    box_line("• Reparando configuración base de Miliciano")
+    for action in repair_core_stack(auto_install=auto_mode, dry_run=dry_run):
+        box_line(f"• {action}")
     box_line("• Revisando prerequisitos base del sistema")
 
-    runtime = basic_runtime_status()
-    runtime_ready = all(runtime[cmd]["path"] for cmd in REQUIRED_SYSTEM_COMMANDS)
-    docker_ready = runtime["docker"]["path"] is not None
-    local_hw = collect_local_ai_hardware()
-    ollama_status = collect_ollama_status()
-    ollama_recos = recommend_ollama_models(local_hw)
-    local_base_model = ollama_recos[0][0]
-    local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
+    snapshot = current_local_stack_snapshot()
+    runtime = snapshot["runtime"]
+    runtime_ready = snapshot["runtime_ready"]
+    python_system = snapshot["python_system"]
+    docker_ready = snapshot["docker_ready"]
+    local_hw = snapshot["local_hw"]
+    ollama_status = snapshot["ollama_status"]
+    ollama_recos = snapshot["ollama_recos"]
+    local_base_model = snapshot["local_base_model"]
+    local_model_ready = snapshot["local_model_ready"]
     box_line("• Revisando perfil e identidad de Miliciano")
-
-    identity = seed_partner_identity_from_env(persist=auto_mode and not dry_run)
-    if interactive and identity.get('partner_name') == 'Miliciano' and not identity.get('owner_name'):
-        box_line("• Configurando identidad personal del partner")
-        partner_name = ask_text("¿Cómo se llamará tu Miliciano?", os.environ.get("MILICIANO_PARTNER_NAME", "Miliciano"))
-        persona_default = os.environ.get("MILICIANO_PERSONA", identity.get('persona_key') or 'operator')
-        persona_key = ask_text("Persona base (operator/guardian/builder/concierge)", persona_default).lower()
-        if persona_key not in PERSONA_PRESETS:
-            persona_key = persona_default
-        owner_name = ask_text("¿Cómo se llama su operador principal?", os.environ.get("MILICIANO_OWNER_NAME", ""))
-        interaction_style = ask_text("¿Qué estilo debe tener?", os.environ.get("MILICIANO_INTERACTION_STYLE", identity.get('interaction_style') or 'directo y útil'))
-        language = ask_text("Idioma por defecto", os.environ.get("MILICIANO_LANGUAGE", identity.get('language') or 'es'))
-        identity = set_partner_identity(
-            partner_name=partner_name,
-            persona_key=persona_key,
-            owner_name=owner_name,
-            interaction_style=interaction_style,
-            language=language,
-        )
-        box_line(f"• Identidad configurada: {identity['partner_name']} ({identity['persona_key']})")
-    elif not interactive:
-        box_line(f"• Identidad activa: {identity.get('partner_name') or 'Miliciano'} ({identity.get('persona_key') or 'operator'})")
+    shell_ui = shell_runtime_status()
 
     profile_dir = Path(MILICIANO_HERMES_HOME)
     soul_path = profile_dir / "SOUL.md"
 
     hermes_installed = which("hermes") is not None
     hermes_already = hermes_installed
-    if auto_mode and not dry_run and not hermes_installed:
-        installed_hermes, hermes_detail = auto_install_hermes(box_line=box_line)
-        hermes_installed = which("hermes") is not None
-        hermes_already = hermes_already or installed_hermes
-        box_line(f"• {'Hermes listo' if installed_hermes else 'Hermes sigue pendiente'}: {hermes_detail}")
 
     profile_preexisting = profile_dir.exists()
     profile_ok = profile_preexisting
     profile_detail = f"Perfil detectado en {profile_dir}" if profile_ok else "No existe el perfil miliciano"
     profile_action = "Sin cambios"
     if hermes_installed and not profile_ok:
-        create = run(["hermes", "profile", "create", "miliciano", "--clone", "--no-alias"], capture=True)
-        if create.returncode == 0 and profile_dir.exists():
+        if dry_run:
+            create = None
+            profile_action = "Dry-run: se crearía automáticamente"
+        else:
+            create = run(["hermes", "profile", "create", "miliciano", "--clone", "--no-alias"], capture=True)
+        if create and create.returncode == 0 and profile_dir.exists():
             profile_ok = True
             profile_detail = f"Perfil creado en {profile_dir}"
             profile_action = "Creado automáticamente"
-        else:
+        elif create:
             create_out = (create.stdout or "").strip()
             profile_action = "No se pudo crear automáticamente"
             if create_out:
@@ -614,14 +171,6 @@ def cmd_setup(args=None):
 
     openclaw_installed = which("openclaw") is not None
     openclaw_already = openclaw_installed
-    if auto_mode and not dry_run and not openclaw_installed:
-        installed_now, install_detail = auto_install_openclaw(box_line=box_line)
-        openclaw_installed = which("openclaw") is not None
-        openclaw_already = openclaw_already or installed_now
-        if installed_now:
-            box_line(f"• {install_detail}")
-        else:
-            box_line(f"• OpenClaw sigue pendiente: {install_detail}")
 
     nemoclaw_wrapper = Path.home() / ".local" / "bin" / "nemoclaw"
     npm_prefix_res = run(["npm", "prefix", "-g"], capture=True, timeout=10)
@@ -651,23 +200,6 @@ def cmd_setup(args=None):
         nemoclaw_detail = f"Wrapper local presente pero el comando no quedó visible en PATH ({nemoclaw_wrapper})"
         nemoclaw_action = "Recrear wrapper o ajustar PATH"
 
-    if auto_mode and not dry_run and not nemoclaw_installed_anywhere:
-        installed_nemo, nemo_auto_detail = auto_install_nemoclaw(box_line=box_line)
-        nemoclaw_on_path = which("nemoclaw") is not None
-        nemoclaw_path = which("nemoclaw")
-        nemoclaw_version_probe = run(["nemoclaw", "--version"], capture=True, timeout=6) if nemoclaw_on_path else None
-        nemoclaw_version_ok = bool(nemoclaw_version_probe and nemoclaw_version_probe.returncode == 0)
-        nemoclaw_global_installed = bool(nemoclaw_global_bin and nemoclaw_global_bin.exists())
-        nemoclaw_local_wrapper_exists = nemoclaw_wrapper.exists()
-        nemoclaw_installed_anywhere = nemoclaw_on_path or nemoclaw_global_installed or nemoclaw_local_wrapper_exists
-        if installed_nemo and nemoclaw_on_path and nemoclaw_version_ok:
-            nemoclaw_ok = True
-            nemoclaw_detail = f"Operativo ({nemoclaw_path})"
-            nemoclaw_action = "Instalado durante este setup"
-        else:
-            nemoclaw_detail = nemo_auto_detail
-            nemoclaw_action = "Sigue pendiente"
-
     box_line("• Revisando motor de ejecución y conectividad")
 
     gateway_was_up = False
@@ -682,19 +214,20 @@ def cmd_setup(args=None):
             gateway_was_up = True
             gateway_detail = "Gateway local respondiendo"
         else:
-            start = run(["openclaw", "gateway", "start"], capture=True)
-            gateway_action = "Intenté levantar el gateway"
-            health = run(["openclaw", "health", "--json"], capture=True)
-            normalized = (health.stdout or "").lower().replace(" ", "")
-            if health.returncode == 0 and '"ok":true' in normalized:
-                gateway_ok = True
-                gateway_detail = "Gateway levantado durante este setup"
-                gateway_action = "Gateway levantado"
+            if dry_run:
+                gateway_action = "Dry-run: intentaría levantar el gateway con `openclaw gateway --force`"
+                gateway_detail = "Gateway no estaba listo al momento del diagnóstico"
             else:
-                gateway_detail = "Gateway no responde"
-                start_out = (start.stdout or "").strip()
-                if start_out:
-                    gateway_detail += f" ({start_out.splitlines()[-1]})"
+                starter = start_openclaw_gateway_detached()
+                gateway_action = "Intenté levantar el gateway con `openclaw gateway --force`"
+                if isinstance(starter, Exception):
+                    gateway_detail = f"No pude iniciar el gateway: {starter}"
+                else:
+                    gateway_ok, gateway_detail = wait_for_openclaw_gateway_ready()
+                    if gateway_ok:
+                        gateway_action = "Gateway levantado"
+                    else:
+                        gateway_detail = f"Gateway no responde ({gateway_detail})"
 
     auth_ok = False
     auth_detail = "OpenClaw no instalado"
@@ -705,45 +238,44 @@ def cmd_setup(args=None):
         auth_store_path = Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
         auth_store_text = auth_store_path.read_text() if auth_store_path.exists() else ""
         if "openai-codex" in auth_store_text and current_model.startswith("openai/"):
-            fix_model = run(["openclaw", "models", "set", "openai-codex/gpt-5.4"], capture=True)
-            if fix_model.returncode == 0:
-                activity_line("Modelo por defecto ajustado", "~/.openclaw/openclaw.json")
-                auth_action = "Ajusté el modelo por defecto a openai-codex/gpt-5.4"
-                current_model = "openai-codex/gpt-5.4"
-        probe = run(["openclaw", "agent", "--agent", "main", "--message", "Responde solo OK"], capture=True)
-        out = (probe.stdout or "")
-        if probe.returncode == 0 and "No API key found for provider" not in out and "FailoverError:" not in out:
-            auth_ok = True
-            auth_detail = f"Auth de modelo lista ({current_model or 'modelo operativo'})"
-            if auth_action == "Revisión solamente":
-                auth_action = "Ya estaba configurada"
-        else:
-            auth_detail = "Falta auth de modelo en OpenClaw"
-            if auth_action == "Revisión solamente":
-                auth_action = "Requiere paso manual"
-        if auto_mode and not dry_run and not auth_ok:
-            auto_auth_ok, auto_auth_detail = auto_configure_openclaw_auth_from_env()
-            if auto_auth_ok:
-                auth_ok = True
-                auth_detail = auto_auth_detail
-                auth_action = "Configurada durante este setup"
+            if dry_run:
+                auth_action = "Dry-run: ajustaría el modelo por defecto a openai-codex/gpt-5.4"
             else:
-                auth_detail = f"{auth_detail}. {auto_auth_detail}"
+                fix_model = run(["openclaw", "models", "set", "openai-codex/gpt-5.4"], capture=True)
+                if fix_model.returncode == 0:
+                    activity_line("Modelo por defecto ajustado", "~/.openclaw/openclaw.json")
+                    auth_action = "Ajusté el modelo por defecto a openai-codex/gpt-5.4"
+                    current_model = "openai-codex/gpt-5.4"
+        auth_ok, auth_detail, auth_snapshot = detect_openclaw_auth_state()
+        if auth_ok and auth_action == "Revisión solamente":
+            auth_action = "Ya estaba configurada"
+        elif auth_action == "Revisión solamente":
+            auth_action = "Requiere paso manual"
 
     step_title(1, "Prerequisitos base del sistema")
     box_line(f"Estado: {status_label(runtime_ready, runtime_ready)}")
     for cmd in PREREQ_COMMANDS:
         path = runtime[cmd]["path"]
         version = runtime[cmd]["version"]
-        required = cmd in REQUIRED_SYSTEM_COMMANDS
-        label = cmd if required else f"{cmd} (opcional)"
         if path:
             detail = version or "Instalado"
-            box_line(f"- {label}: OK · {detail}")
+            box_line(f"- {cmd}: OK · {detail}")
         else:
-            box_line(f"- {label}: {'FALTA' if required else 'no detectado'}")
+            box_line(f"- {cmd}: FALTA")
     if not runtime_ready:
-        box_line("Siguiente paso: completar python3, node, npm y curl antes de cerrar el setup base")
+        box_line("Siguiente paso: completar node, npm, curl y docker antes de cerrar el setup base")
+
+    step_title(1.5, "Runtime Python local")
+    box_line(f"Estado: {status_label(python_system['ok'], python_system['ok'])}")
+    box_line(f"Detalle: {python_system['detail']}")
+    if python_system["missing"]:
+        box_line("Siguiente paso: dejar Python con pip/venv/ensurepip antes de instalar dependencias locales del shell.")
+
+    step_title(1.6, "Shell interactivo")
+    box_line(f"Estado: {status_label(shell_ui['available'], shell_ui['available'])}")
+    box_line(f"Detalle: {shell_ui['detail']}")
+    if not shell_ui["available"]:
+        box_line(f"Siguiente paso: {shell_ui.get('action') or 'reparar runtime Python local'}")
 
     step_title(2, "Hermes")
     box_line(f"Estado: {status_label(hermes_installed, hermes_already)}")
@@ -765,7 +297,66 @@ def cmd_setup(args=None):
     box_line(f"Estado: {status_label(openclaw_installed, openclaw_already)}")
     box_line(f"Detalle: {'OpenClaw instalado' if openclaw_installed else 'Falta instalar OpenClaw'}")
     if not openclaw_installed:
-        box_line("Siguiente paso: instalar OpenClaw")
+        openclaw_install_cmd = os.environ.get("MILICIANO_OPENCLAW_INSTALL_CMD", "").strip()
+        openclaw_install_url = os.environ.get("MILICIANO_OPENCLAW_INSTALL_URL", "").strip()
+        if auto_mode:
+            box_line("Intentando instalar OpenClaw automáticamente...")
+            if openclaw_install_cmd:
+                # WARNING: Custom install commands from env vars are dangerous
+                # Only basic validation - users must ensure command is safe
+                if any(dangerous in openclaw_install_cmd.lower() for dangerous in ["rm -rf", "curl |", "wget |", "eval"]):
+                    box_line("❌ Error: Install command contains dangerous patterns")
+                    box_line(f"Rejected command: {openclaw_install_cmd}")
+                    return False, "Comando de instalación rechazado por seguridad"
+                install_run = run(["bash", "-lc", openclaw_install_cmd], capture=True, timeout=600)
+            elif openclaw_install_url:
+                # Validate URL before using
+                try:
+                    validated_url = validate_install_url(openclaw_install_url)
+                    box_line(f"Descargando desde: {validated_url}")
+                    script_path = download_and_verify_script(validated_url)
+                    try:
+                        install_run = run(["bash", script_path], capture=True, timeout=600)
+                    finally:
+                        try:
+                            os.remove(script_path)
+                        except:
+                            pass
+                except ValidationError as e:
+                    box_line(f"❌ Error: {e}")
+                    return False, f"URL de instalación no confiable: {openclaw_install_url}"
+            else:
+                install_run = run(["bash", "-lc", "npm install -g openclaw"], capture=True, timeout=600)
+                if install_run.returncode != 0:
+                    install_run = run(["bash", "-lc", "npm install -g openclaw@latest"], capture=True, timeout=600)
+            if install_run.returncode == 0 and which("openclaw"):
+                openclaw_installed = True
+                openclaw_already = True
+                box_line("OpenClaw quedó instalado.")
+                health = run(["openclaw", "health", "--json"], capture=True)
+                normalized = (health.stdout or "").lower().replace(" ", "")
+                if health.returncode == 0 and '\"ok\":true' in normalized:
+                    gateway_ok = True
+                    gateway_was_up = True
+                    gateway_detail = "Gateway local respondiendo"
+                else:
+                    starter = start_openclaw_gateway_detached()
+                    gateway_action = "Intenté levantar el gateway con `openclaw gateway --force`"
+                    if isinstance(starter, Exception):
+                        gateway_detail = f"No pude iniciar el gateway: {starter}"
+                    else:
+                        gateway_ok, gateway_detail = wait_for_openclaw_gateway_ready()
+                        if gateway_ok:
+                            gateway_action = "Gateway levantado"
+                        else:
+                            gateway_detail = f"Gateway no responde ({gateway_detail})"
+            else:
+                out = (install_run.stdout or "").strip()
+                if out:
+                    box_line(out)
+                box_line("OpenClaw sigue pendiente; falló la instalación automática.")
+        else:
+            box_line("Siguiente paso: instalar OpenClaw")
 
     step_title(6, "Gateway de OpenClaw")
     box_line(f"Estado: {status_label(gateway_ok, gateway_was_up)}")
@@ -788,41 +379,25 @@ def cmd_setup(args=None):
     box_line(f"Detalle: {nemoclaw_detail}")
     box_line(f"Acción: {nemoclaw_action}")
     box_line(f"Docker para Nemo: {'OK' if docker_ready else 'PENDIENTE'}")
+
+    # Setup policy configuration
+    if dry_run:
+        box_line("Política: [dry-run] verificaría o crearía ~/.config/miliciano/policy.yaml")
+    else:
+        policy_created, policy_msg = ensure_policy_config()
+        box_line(f"Política: {policy_msg}")
+
     if not nemoclaw_ok:
         box_line("Siguiente paso: revisar o reparar el acceso de Nemoclaw desde Miliciano")
         box_line("Nota: Miliciano puede funcionar sin Nemoclaw en esta fase")
+        box_line("Nota: Política de seguridad activa con fallback simple si Nemoclaw no disponible")
 
-    if auto_mode and not dry_run and not ollama_status["path"]:
-        box_line("• Intentando instalar Ollama automáticamente")
-        installed, install_detail = auto_install_ollama(box_line=box_line)
-        ollama_status = collect_ollama_status(refresh=True)
-        if installed:
-            box_line(f"• {install_detail}")
-        else:
-            box_line(f"• Ollama sigue pendiente: {install_detail}")
-        local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
-
-    if auto_mode and not dry_run and ollama_status["path"] and not ollama_status["api_ok"]:
-        box_line("• Intentando levantar Ollama automáticamente")
-        started, started_detail = auto_start_ollama_service()
-        ollama_status = collect_ollama_status(refresh=True)
-        if started:
-            box_line(f"• {started_detail}")
-        else:
-            box_line(f"• Ollama sigue pendiente: {started_detail}")
-        local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
-
-    if auto_mode and not dry_run and ollama_status["path"] and ollama_status["api_ok"] and not ollama_status["models"]:
-        box_line(f"• Descargando modelo base recomendado en Ollama: {local_base_model}")
-        pull = pull_ollama_model(local_base_model)
-        if pull.returncode == 0:
-            box_line(f"• {local_base_model} quedó descargado")
-        else:
-            out = (pull.stdout or "").strip()
-            if out:
-                box_line(f"• No pude descargar {local_base_model}: {out.splitlines()[-1]}")
-        ollama_status = collect_ollama_status(refresh=True)
-        local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
+    ollama_status = (
+        collect_ollama_status()
+        if dry_run
+        else ensure_ollama_ready(box_line, local_base_model, auto_mode, download_and_verify_script, TRUSTED_SOURCES)
+    )
+    local_model_ready = bool(ollama_status["path"] and ollama_status["api_ok"] and ollama_status["models"])
 
     step_title(9, "Inferencia local con Ollama")
     box_line(f"Estado: {status_label(local_model_ready, local_model_ready)}")
@@ -840,7 +415,7 @@ def cmd_setup(args=None):
         box_line(f"Modelos locales ya descargados: {', '.join(ollama_status['models'][:4])}")
     else:
         box_line("Modelos locales ya descargados: ninguno")
-        if ollama_status["path"] and ollama_status["api_ok"]:
+        if auto_mode and ollama_status["path"] and ollama_status["api_ok"]:
             box_line(f"Siguiente paso: descargar ahora {local_base_model} para dejar la base local lista")
 
     nvidia_status = collect_nvidia_status()
@@ -851,17 +426,8 @@ def cmd_setup(args=None):
     box_line(f"Base URL: {nvidia_status['base_url']}")
     box_line(f"Modelo: {nvidia_status['model'] or 'sin definir'}")
     box_line("Nota: este fallback es opcional y solo se activa si lo habilitas en tu configuración local.")
-    if interactive and nvidia_status["api_key_present"] and not nvidia_status["enabled"]:
-        if ask_yes_no("¿Quieres activar ahora el fallback NVIDIA con este modelo?", default=False):
-            state = load_miliciano_state()
-            state.setdefault("nvidia", {})["enabled"] = True
-            state["nvidia"]["api_key_present"] = True
-            state["nvidia"]["base_url"] = NVIDIA_BASE_URL
-            state["nvidia"]["model"] = nvidia_status["model"] or NVIDIA_DEFAULT_MODEL
-            state.setdefault("routing", {})["fallback"] = state["nvidia"]["model"]
-            save_miliciano_state(state)
-            nvidia_status = collect_nvidia_status(refresh=True)
-            print(f"  {GREEN}Listo:{RESET} fallback NVIDIA activado.")
+    if not dry_run:
+        nvidia_status = maybe_configure_nvidia(ask_yes_no, NVIDIA_BASE_URL, NVIDIA_DEFAULT_MODEL)
 
     step_title(11, "Resumen")
     reasoning_ok = hermes_installed and profile_ok and soul_ok
@@ -879,25 +445,6 @@ def cmd_setup(args=None):
     box_line(f"execution  {status_badge('ready' if execution_ok else 'pending')}")
     box_line(f"local base {status_badge('ready' if local_inference_ok else 'pending')}")
     box_line(f"policy     {status_badge('ready' if nemoclaw_ok else 'pending')}")
-
-    if dry_run:
-        step_title("11b", "Plan de acciones")
-        if not hermes_installed:
-            box_line("- Intentaría instalar Hermes si defines MILICIANO_HERMES_INSTALL_CMD o MILICIANO_HERMES_INSTALL_URL.")
-        if not openclaw_installed:
-            box_line("- Intentaría instalar OpenClaw (por defecto con npm install -g openclaw).")
-        if not gateway_ok and openclaw_installed:
-            box_line("- Intentaría levantar el gateway de OpenClaw.")
-        if not auth_ok and openclaw_installed:
-            box_line("- Intentaría resolver auth de OpenClaw si OPENAI_API_KEY está presente.")
-        if not nemoclaw_ok:
-            box_line("- Intentaría dejar Nemoclaw operativo y visible en PATH.")
-        if not ollama_status["path"]:
-            box_line("- Intentaría instalar Ollama en ~/.local si hay curl, tar y zstd.")
-        elif not ollama_status["api_ok"]:
-            box_line("- Intentaría levantar `ollama serve`.")
-        elif not ollama_status["models"]:
-            box_line(f"- Intentaría descargar {local_base_model} como base local.")
 
     step_title(12, "Próximo paso recomendado")
     if not hermes_installed:
@@ -920,7 +467,7 @@ def cmd_setup(args=None):
         box_line("- Stack listo. Ya puedes usar Miliciano con base local y escalar a proveedor pagado cuando quieras")
     box_bottom()
 
-    if interactive and ollama_status["path"] and ollama_status["api_ok"] and not ollama_status["models"]:
+    if not auto_mode and sys.stdin.isatty() and sys.stdout.isatty() and ollama_status["path"] and ollama_status["api_ok"] and not ollama_status["models"]:
         if ask_yes_no(f"\nNo hay modelos locales en Ollama. ¿Quieres descargar ahora {local_base_model} como base de Miliciano?", default=True):
             pull = pull_ollama_model(local_base_model)
             if pull.returncode == 0:
@@ -933,201 +480,25 @@ def cmd_setup(args=None):
                 if out:
                     print(out)
 
-    if interactive and auth_can_offer_resolution:
-        if ask_yes_no("\n¿Quieres resolver ahora las credenciales de ejecución desde Miliciano?", default=True):
-            print(f"\n{VIOLET}{BOLD}Métodos disponibles:{RESET}")
-            print("  1) Reutilizar la API de OpenAI detectada en esta sesión")
-            print("  2) OAuth de OpenAI Codex")
-            print("  3) Pegar token manualmente")
-            print("  4) Login con GitHub Copilot")
-            print("  5) Cancelar por ahora")
-            try:
-                choice = input("Elige una opción [1-5]: ").strip() or "1"
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n  {YELLOW}Cancelado.{RESET}")
-                choice = "5"
-
-            try:
-                if choice == "1":
-                    env_key = os.environ.get("OPENAI_API_KEY")
-                    if env_key:
-                        print(f"\n{VIOLET}{BOLD}Reutilizando la credencial OpenAI detectada...{RESET}")
-                        auth_cmd = (
-                            "python3 - <<'PY'\n"
-                            "import os, pty, sys\n"
-                            "pid, fd = pty.fork()\n"
-                            "if pid == 0:\n"
-                            "    os.execvp('openclaw', ['openclaw','models','auth','paste-token','--provider','openai'])\n"
-                            "buf = b''\n"
-                            "token = (os.environ.get('OPENAI_API_KEY','') + '\\n').encode()\n"
-                            "sent = False\n"
-                            "while True:\n"
-                            "    try:\n"
-                            "        data = os.read(fd, 1024)\n"
-                            "    except OSError:\n"
-                            "        break\n"
-                            "    if not data:\n"
-                            "        break\n"
-                            "    os.write(1, data)\n"
-                            "    buf += data.lower()\n"
-                            "    if (b'token' in buf or b'paste' in buf or b'api key' in buf) and not sent:\n"
-                            "        os.write(fd, token)\n"
-                            "        sent = True\n"
-                            "_, status = os.waitpid(pid, 0)\n"
-                            "sys.exit(os.waitstatus_to_exitcode(status))\n"
-                            "PY"
-                        )
-                        auth_run = run(["bash", "-lc", auth_cmd])
-                    else:
-                        print(f"  {YELLOW}No encontré OPENAI_API_KEY en esta sesión.{RESET}")
-                        auth_run = None
-                elif choice == "2":
-                    print(f"\n{VIOLET}{BOLD}Abriendo OAuth de OpenAI Codex...{RESET}")
-                    auth_run = run(["openclaw", "models", "auth", "login", "--provider", "openai-codex"])
-                elif choice == "3":
-                    print(f"\n{VIOLET}{BOLD}Abriendo asistente para pegar token manualmente...{RESET}")
-                    auth_run = run(["openclaw", "models", "auth", "paste-token"])
-                elif choice == "4":
-                    print(f"\n{VIOLET}{BOLD}Abriendo login de GitHub Copilot...{RESET}")
-                    auth_run = run(["openclaw", "models", "auth", "login-github-copilot"])
-                else:
-                    auth_run = None
-            except KeyboardInterrupt:
-                print(f"\n  {YELLOW}Configuración cancelada. Volviendo a Miliciano...{RESET}")
-                auth_run = None
-
-            if auth_run is not None:
-                probe = run(["openclaw", "agent", "--agent", "main", "--message", "Responde solo OK"], capture=True)
-                out = (probe.stdout or "")
-                if probe.returncode == 0 and "No API key found for provider" not in out and "FailoverError:" not in out:
-                    print(f"  {GREEN}Listo:{RESET} la auth quedó configurada.")
-                    auth_ok = True
-                else:
-                    print(f"  {YELLOW}Aún pendiente:{RESET} seguimos dentro de Miliciano; puedes reintentar el setup cuando quieras.")
-
-    if interactive and nemoclaw_can_offer_resolution:
-        while True:
-            if not ask_yes_no("\n¿Quieres revisar ahora Nemoclaw desde Miliciano?", default=True):
-                print(f"  {SOFT}Nemoclaw sigue pendiente.{RESET}")
-                break
-            print(f"\n{VIOLET}{BOLD}Opciones para Nemoclaw:{RESET}")
-            print("  1) Diagnosticar el estado actual")
-            if nemoclaw_installed_anywhere:
-                print("  2) Reparar acceso en PATH / wrapper")
-                print("  3) Limpiar wrapper roto de ~/.local/bin")
-                print("  4) Dejarlo pendiente por ahora")
-                max_choice = 4
-            else:
-                print("  2) Instalar desde NVIDIA (nvidia.com/nemoclaw)")
-                print("  3) Reparar acceso en PATH / wrapper")
-                print("  4) Limpiar wrapper roto de ~/.local/bin")
-                print("  5) Dejarlo pendiente por ahora")
-                max_choice = 5
-            try:
-                nemo_choice = input(f"Elige una opción [1-{max_choice}]: ").strip() or "1"
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n  {YELLOW}Cancelado.{RESET}")
-                nemo_choice = str(max_choice)
-
-            if nemo_choice == "1":
-                print(f"  {YELLOW}Diagnóstico:{RESET} on_path: {'sí' if nemoclaw_on_path else 'no'} · global_bin: {'sí' if nemoclaw_global_installed else 'no'} · wrapper local: {'sí' if nemoclaw_local_wrapper_exists else 'no'}")
-                if nemoclaw_on_path:
-                    probe_out = (nemoclaw_version_probe.stdout or "").strip() if nemoclaw_version_probe else ""
-                    if nemoclaw_version_ok:
-                        print(f"  Comando operativo en PATH: {nemoclaw_path}")
-                    else:
-                        print(f"  El comando existe pero `nemoclaw --version` falló: {probe_out or 'sin salida'}")
-                elif nemoclaw_global_installed:
-                    print(f"  Hay instalación global, pero el binario no quedó expuesto en PATH: {nemoclaw_global_bin}")
-                elif nemoclaw_local_wrapper_exists:
-                    print(f"  Hay wrapper local, pero no está visible como comando: {nemoclaw_wrapper}")
-                else:
-                    print("  No detecté instalación real de Nemoclaw en este sistema.")
-                continue
-            elif nemo_choice == "2" and not nemoclaw_installed_anywhere:
-                print(f"\n{VIOLET}{BOLD}Instalando Nemoclaw desde NVIDIA...{RESET}")
-                print(f"{SOFT}Fuente oficial: https://www.nvidia.com/nemoclaw.sh{RESET}")
-                install_cmd = "curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash"
-                install_run = run(["bash", "-lc", install_cmd])
-                if install_run.returncode == 0:
-                    nemoclaw_on_path = which("nemoclaw") is not None
-                    if nemoclaw_on_path:
-                        check = run(["nemoclaw", "--version"], capture=True)
-                        if check.returncode == 0:
-                            activity_line("Nemoclaw instalado desde NVIDIA", str(nemoclaw_wrapper))
-                            nemoclaw_ok = True
-                            nemoclaw_detail = f"Operativo ({which('nemoclaw')})"
-                            nemoclaw_action = "Instalado desde NVIDIA"
-                            print(f"  {GREEN}Listo:{RESET} Nemoclaw quedó operativo.")
-                            break
-                print(f"  {YELLOW}Nemoclaw aún no quedó operativo.{RESET} Revisa la salida del instalador o vuelve a intentar.")
-                continue
-            elif nemo_choice == "2" and nemoclaw_installed_anywhere:
-                try:
-                    if nemoclaw_on_path and nemoclaw_version_ok:
-                        print(f"  {GREEN}Nemoclaw ya está operativo.{RESET} No hace falta reinstalar.")
-                        break
-                    nemoclaw_wrapper.parent.mkdir(parents=True, exist_ok=True)
-                    wrapper_content = f'''#!/usr/bin/env bash
-if command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm prefix -g 2>/dev/null | tail -n 1)"
-  if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/nemoclaw" ]; then
-    exec "$NPM_PREFIX/bin/nemoclaw" "$@"
-  fi
-fi
-if [ -x "$(command -v nemoclaw 2>/dev/null)" ]; then
-  exec "$(command -v nemoclaw)" "$@"
-fi
-printf '[Nemoclaw] existe instalación, pero no está expuesta correctamente en PATH.\n' >&2
-printf '[Nemoclaw] intenta ejecutar: npm prefix -g && ls -l "$NPM_PREFIX/bin/nemoclaw"\n' >&2
-exit 1
-'''
-                    nemoclaw_wrapper.write_text(wrapper_content)
-                    os.chmod(nemoclaw_wrapper, 0o755)
-                    activity_line("Wrapper de acceso recreado", str(nemoclaw_wrapper))
-                    print(f"  {GREEN}Listo:{RESET} recreé el wrapper en PATH para Nemoclaw.")
-                    nemoclaw_on_path = True
-                    nemoclaw_action = "Wrapper recreado"
-                    nemoclaw_detail = f"Comando expuesto por wrapper local ({nemoclaw_wrapper})"
-                except Exception as e:
-                    print(f"  {YELLOW}No pude recrear el wrapper:{RESET} {e}")
-                continue
-            elif nemo_choice == "3":
-                try:
-                    if os.path.lexists(nemoclaw_wrapper):
-                        os.remove(nemoclaw_wrapper)
-                        activity_line("Wrapper roto eliminado", str(nemoclaw_wrapper))
-                        print(f"  {GREEN}Listo:{RESET} eliminé el wrapper roto {nemoclaw_wrapper}.")
-                        nemoclaw_on_path = False
-                        nemoclaw_action = "Wrapper eliminado"
-                        if nemoclaw_global_installed:
-                            nemoclaw_detail = f"Instalado globalmente, pero sin comando expuesto en PATH ({nemoclaw_global_bin})"
-                        else:
-                            nemoclaw_detail = "No encontrado"
-                    else:
-                        print(f"  {YELLOW}Nada que limpiar:{RESET} no encontré wrapper en {nemoclaw_wrapper}.")
-                except Exception as e:
-                    print(f"  {YELLOW}No pude limpiar el wrapper:{RESET} {e}")
-                continue
-            else:
-                print(f"  {SOFT}Dejado pendiente.{RESET}")
-                break
+    if not dry_run:
+        maybe_resolve_openclaw_auth(auto_mode, auth_can_offer_resolution, ask_yes_no)
+        maybe_review_nemoclaw(
+            auto_mode,
+            nemoclaw_can_offer_resolution,
+            ask_yes_no,
+            TRUSTED_SOURCES["nemoclaw"]["url"],
+            nemoclaw_wrapper,
+            nemoclaw_on_path,
+            nemoclaw_version_ok,
+            nemoclaw_global_installed,
+            nemoclaw_local_wrapper_exists,
+            nemoclaw_global_bin,
+        )
 
     setup_complete = reasoning_ok and execution_ok and local_model_ready
-    save_install_report("setup", {
-        "mode": "dry-run" if dry_run else ("auto" if auto_mode else "interactive"),
-        "runtime_ready": runtime_ready,
-        "reasoning_ok": reasoning_ok,
-        "execution_ok": execution_ok,
-        "policy_ok": nemoclaw_ok,
-        "local_inference_ok": local_model_ready,
-        "runtime": runtime,
-        "ollama": ollama_status,
-        "nvidia": nvidia_status,
-    })
-    if interactive and setup_complete:
+    if not dry_run and sys.stdin.isatty() and sys.stdout.isatty() and setup_complete:
         if ask_yes_no("\n¿Quieres entrar ahora al chat de Miliciano?", default=False):
-            interactive_chat()
+            run_shell()
 
 
 def cmd_repair():
@@ -1151,7 +522,7 @@ def cmd_repair():
     banner()
     box_top()
     box_line("Repair de Miliciano")
-    box_line("Este comando no instala el stack completo: repara la configuración local, wrappers y sincronización de rutas.")
+    box_line("Este comando no instala el stack completo del sistema, pero sí repara dependencias Python locales, wrappers y sincronización de rutas.")
     box_line("Si setup ya dejó todo bien, repair solo confirmará y alineará los componentes que puedan haberse roto.")
     box_line("")
     for action in repair_core_stack():
@@ -1160,3 +531,10 @@ def cmd_repair():
     box_line(f"Siguiente paso: usa {GREEN}miliciano status{RESET} para leer el estado y {GREEN}miliciano doctor{RESET} si quieres diagnóstico profundo.")
     box_line(f"Si falta algún binario externo, {YELLOW}repair{RESET} no inventa instalaciones del sistema operativo.")
     box_bottom()
+
+
+def cmd_bootstrap(args=None):
+    args = list(args or [])
+    if not any(flag in args for flag in {"--auto", "--yes", "-y", "--noninteractive"}):
+        args.append("--auto")
+    cmd_setup(args)

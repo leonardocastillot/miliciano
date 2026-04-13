@@ -1,0 +1,11 @@
+# Miliciano Python Dependencies
+
+# Core dependencies (required)
+prompt_toolkit>=3.0.43  # Interactive shell, keybindings, multiline prompt
+
+# Security dependencies (recommended for encryption)
+cryptography>=41.0.0
+keyring>=24.0.0
+
+# Development dependencies (for testing)
+# Install with: pip3 install -r requirements-dev.txt

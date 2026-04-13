@@ -1,0 +1,139 @@
+# Miliciano Security Policy Configuration
+# Nemoclaw Policy Enforcement
+
+version: "1.0"
+
+# Policy enforcement mode
+# - enforce: Block dangerous operations
+# - audit: Log violations but allow execution
+# - disabled: No policy checks
+mode: enforce
+
+# Command filtering rules
+allowed_commands:
+  # Read-only filesystem operations
+  - pattern: "^(ls|cat|grep|find|head|tail|less|more)\\b"
+    description: "Read-only filesystem commands"
+    risk: low
+
+  # Git read operations
+  - pattern: "^git (status|log|diff|show|branch|remote)\\b"
+    description: "Read-only git operations"
+    risk: low
+
+  # Package management queries
+  - pattern: "^(npm|pip|apt) (list|show|search)\\b"
+    description: "Package info queries"
+    risk: low
+
+  # System info
+  - pattern: "^(ps|top|df|du|uname|whoami|pwd)\\b"
+    description: "System information commands"
+    risk: low
+
+# Blocked commands (high risk)
+blocked_commands:
+  # Destructive filesystem operations
+  - pattern: "\\b(rm|rmdir|del)\\s+.*(\\s-rf|\\s-r|\\s-f)"
+    description: "Recursive/force file deletion"
+    risk: critical
+    reason: "Can cause data loss"
+
+  # Shell injection patterns
+  - pattern: "\\|\\s*(bash|sh|zsh|fish)\\b"
+    description: "Piping to shell interpreter"
+    risk: critical
+    reason: "Command injection vector"
+
+  # Dynamic code evaluation
+  - pattern: "\\beval\\s*\\("
+    description: "Dynamic code evaluation"
+    risk: high
+    reason: "Code injection risk"
+
+  # Privilege escalation
+  - pattern: "^sudo\\s+"
+    description: "Privilege escalation"
+    risk: high
+    reason: "Requires manual approval"
+
+  # System modification
+  - pattern: "\\b(shutdown|reboot|halt|poweroff)\\b"
+    description: "System power operations"
+    risk: high
+    reason: "Affects system availability"
+
+  # Package installation without approval
+  - pattern: "^(npm|pip|apt|yum)\\s+(install|remove|uninstall)"
+    description: "Package management operations"
+    risk: medium
+    reason: "Modifies system state"
+
+# Resource limits
+limits:
+  # Maximum execution time (seconds)
+  max_execution_time: 300
+
+  # Maximum memory usage (MB)
+  max_memory: 2048
+
+  # Maximum disk write (MB)
+  max_disk_write: 1024
+
+  # Maximum network bandwidth (MB/s)
+  max_network_bandwidth: 10
+
+# Audit logging
+audit:
+  # Enable audit logging
+  enabled: true
+
+  # Log file location
+  log_path: "~/.config/miliciano/audit.log"
+
+  # Retention period (days)
+  retention_days: 90
+
+  # Log successful operations (not just violations)
+  log_success: true
+
+  # Include full command output in logs
+  log_output: false
+
+# Notifications
+notifications:
+  # Enable notifications for policy violations
+  enabled: false
+
+  # Notification channels
+  channels:
+    - type: console
+      level: critical
+    # - type: email
+    #   level: high
+    #   recipient: security@example.com
+
+# Exemptions (use with caution)
+exemptions:
+  # Users who bypass policy checks
+  users: []
+
+  # Commands that bypass checks
+  commands: []
+
+  # Directories with relaxed policies
+  directories: []
+
+# Advanced options
+advanced:
+  # Fail open if Nemoclaw unavailable
+  fail_open: true
+
+  # Timeout for policy checks (seconds)
+  policy_check_timeout: 10
+
+  # Enable machine learning-based anomaly detection
+  ml_detection: false
+
+  # Send telemetry to Nemoclaw cloud (if configured)
+  cloud_telemetry: false

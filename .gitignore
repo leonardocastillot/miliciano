@@ -2,4 +2,9 @@ node_modules/
 *.tgz
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+coverage_html/
+.coverage
+coverage.json
 .DS_Store

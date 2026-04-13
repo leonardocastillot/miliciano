@@ -1,184 +1,366 @@
-# @milytics/miliciano
+# Miliciano
 
-Miliciano CLI by Milytics.
+> Agente de IA táctico con razonamiento (Hermes), ejecución (OpenClaw) y política de seguridad (Nemoclaw)
 
-Instalación rápida del CLI:
+**Por Milytics** | Versión 0.3.0
 
-```bash
-npm install -g @milytics/miliciano
+[![Security](https://img.shields.io/badge/security-hardened-green.svg)](docs/SECURITY.md)
+[![Tests](https://img.shields.io/badge/tests-280%2B-blue.svg)](tests/)
+[![Coverage](https://img.shields.io/badge/coverage-75%25-brightgreen.svg)](PHASE3_COMPLETE.md)
+[![Production Ready](https://img.shields.io/badge/production-7.5%2F10-yellow.svg)](PHASE4_COMPLETE.md)
+
+---
+
+## 🎯 Qué es Miliciano
+
+Miliciano es un CLI que orquesta tres componentes para crear un agente de IA completo:
+
+- **🧠 Hermes** - Cerebro de razonamiento (LLM remoto para análisis y planificación)
+- **✋ OpenClaw** - Manos de ejecución (runtime de agentes para ejecutar tareas)
+- **🛡️ Nemoclaw** - Firewall de seguridad (capa de política que bloquea operaciones peligrosas)
+
+**Flujo**:
+```
+Usuario → Hermes (planifica) → Nemoclaw (valida) → OpenClaw (ejecuta) → Resultado
 ```
 
-Comandos principales:
+---
 
+## ✨ Características
+
+### Seguridad Reforzada (Phase 1-2)
+- ✅ **Validación de entrada**: Bloquea inyección de shell, path traversal, SQL injection
+- ✅ **Descarga segura**: Verificación de checksums para scripts externos
+- ✅ **Política de seguridad**: Patrones bloqueados (`rm -rf`, `eval()`, `| bash`)
+- ✅ **Cifrado de credenciales**: API keys cifradas en reposo (opcional)
+- ✅ **Registro de auditoría**: Log de todas las operaciones
+
+### Observabilidad (Phase 3-4)
+- ✅ **280+ tests**: Suite completa con pytest
+- ✅ **Logging estructurado**: JSON logs con rotación automática
+- ✅ **Health checks**: Endpoint HTTP `/health` para monitoreo
+- ✅ **Métricas**: Duración, éxito/fallo, eventos de seguridad
+
+### Inteligencia
+- ✅ **Routing dinámico**: 5 rutas (reasoning, execution, fast, local, fallback)
+- ✅ **Multi-proveedor**: OpenAI, Anthropic, Groq, Ollama local, NVIDIA
+- ✅ **Grafo de conocimiento**: Integración con Obsidian
+- ✅ **Memoria persistente**: Historial de decisiones y skills
+
+### Operación diaria
+- ✅ **Shell táctico por modos**: reasoning, plan y unrestricted desde el chat interactivo
+- ✅ **Setup y repair**: bootstrap, convergencia local y reparación de wrappers/PATH
+- ✅ **Gestión de providers**: auth, provider, model y route desde un solo CLI
+- ✅ **Registry de herramientas**: inspección de tools y health operativo
+
+---
+
+## 🚀 Instalación Rápida
+
+### Requisitos
+- **OS**: Linux (Ubuntu 22.04+)
+- **Runtime**: Node.js >= 18, Python 3.10+
+- **Opcional**: Docker (para Nemoclaw full)
+
+### Instalar
 ```bash
-miliciano
-miliciano home
-miliciano start
-miliciano day
-miliciano today
-miliciano about
-miliciano task
-miliciano tasks
-miliciano jobs
-miliciano status
-miliciano identity
-miliciano ask "..."
-miliciano boundary "..."
-miliciano trace
-miliciano setup
+# Instalar Miliciano globalmente
+npm install -g @milytics/miliciano
+
+# Setup automático recomendado
 miliciano setup --auto
-miliciano setup --dry-run
+
+# Alias operativo equivalente
 miliciano bootstrap
-miliciano bootstrap --dry-run
-miliciano doctor
-miliciano repair
-miliciano think "..."
-miliciano exec "..."
-miliciano mission "..."
+
+# Verificar instalación
+miliciano status
+```
+
+### Configurar API Key
+```bash
+# Opción 1: Variable de entorno
+export OPENAI_API_KEY=sk-...
+
+# Opción 2: Configurar con Miliciano
+miliciano auth add openclaw openai-codex sk-...
+
+# Verificar
+miliciano status
+```
+
+---
+
+## 📖 Uso Básico
+
+### Comandos Principales
+
+#### 1. `think` - Razonamiento
+```bash
+# Hacer una pregunta, obtener análisis
+miliciano think "¿Cómo debería arquitecturar un backend de microservicios?"
+```
+
+#### 2. `exec` - Ejecución
+```bash
+# Ejecutar una tarea
+miliciano exec "Listar archivos en /tmp y resumir"
+```
+
+#### 3. `mission` - Misión completa
+```bash
+# Plan (Hermes) + Ejecución (OpenClaw)
+miliciano mission "Automatizar el pipeline de testing"
+```
+
+#### 4. `shell` - Modo interactivo
+```bash
+# Chat interactivo táctico
 miliciano shell
 ```
 
-Requisitos base:
-- Linux
-- python3
-- Node.js >= 18
-- npm
-- curl
-
-Qué hace cada comando:
-- `miliciano` abre la home diaria de Miliciano.
-- `miliciano home` y `miliciano start` muestran el panel principal con tu partner, modos y atajos de trabajo.
-- `miliciano day` y `miliciano today` muestran el comando diario con prioridades, tareas y jobs vencidos.
-- `miliciano about` muestra un pitch corto para explicar el producto o compartirlo.
-- `miliciano task` gestiona la bandeja diaria de trabajo humano.
-- `miliciano task priority` cambia la prioridad de una tarea para que el daily dashboard la ordene mejor.
-- `miliciano tasks` es alias de `task`.
-- `miliciano jobs` administra automatizaciones persistentes guardadas por Miliciano.
-- Soporta schedules simples tipo `every 1h`, `every 30m` y cron de 5 campos tipo `0 9 * * *`.
-- `miliciano jobs scheduler --once` corre los jobs vencidos una vez; `--loop` los deja corriendo en bucle como daemon ligero.
-- `miliciano task` te da un inbox diario: crear, empezar, completar y cancelar tareas humanas.
-- Miliciano es dueño del registro y de la intención; Hermes aporta razonamiento y OpenClaw la ejecución.
-- `miliciano shell` abre el chat táctico interactivo.
-- `miliciano status` muestra el estado real del stack.
-- `miliciano identity` muestra o cambia el nombre, la persona y el estilo del partner.
-- `miliciano ask` es la entrada principal orquestada: Miliciano decide cuándo pensar, ejecutar o activar boundary.
-- `miliciano boundary` fuerza el path outward/seguro cuando quieres trabajar explícitamente sobre exposición o servicios externos.
-- `miliciano trace` muestra la última decisión del orquestador, el verdict de policy y el resultado final.
-- `miliciano setup` revisa el stack y corrige lo que puede.
-- `miliciano setup --auto` intenta dejar el stack listo sin pedir confirmaciones.
-- `miliciano setup --dry-run` muestra qué revisaría y qué intentaría corregir, sin tocar el sistema.
-- `miliciano bootstrap` hace instalación integral: valida prerequisitos, instala componentes faltantes y termina ejecutando `setup --auto`.
-- `miliciano bootstrap --dry-run` te da el plan completo de instalación antes de ejecutar nada.
-- `miliciano doctor` corre diagnóstico profundo.
-- `miliciano repair` repara wrappers, PATH y sincronización local.
-
-Flujo recomendado desde cero:
-
-1. Instala el CLI:
+Si el shell interactivo detecta una dependencia faltante, usa:
 
 ```bash
-npm install -g @milytics/miliciano
+miliciano setup
 ```
 
-2. Mira el plan antes de tocar nada:
+`setup` ahora repara automáticamente la dependencia del shell (`prompt_toolkit`) sin depender de que estés parado en la carpeta del repo.
+En Debian/Ubuntu también diagnostica si faltan `pip`/`venv` del sistema y propone repararlos antes de instalar el runtime Python local.
+
+Atajos del shell:
+- `Shift+Tab` / `Ctrl+T` / `Alt+M` cambia modo
+- `Enter` envía
+- `Esc+Enter` agrega una nueva línea
+
+### Comandos de Configuración
 
 ```bash
-miliciano bootstrap --dry-run
+# Ver estado de componentes
+miliciano status
+
+# Configurar modelo
+miliciano model hermes openai-codex/gpt-4
+miliciano model openclaw openai-codex/gpt-4
+
+# Configurar routing
+miliciano route set reasoning openai-codex/gpt-4
+miliciano route set fast custom/qwen2.5:3b
+miliciano route sync
+
+# Gestionar auth / providers
+miliciano auth add hermes openai sk-...
+miliciano provider connect nvidia nvapi-...
+miliciano provider activate execution openai-codex/gpt-4
+
+# Permisos y herramientas
+miliciano permission enforce
+miliciano tools list
+miliciano tools health
+
+# Diagnosticar problemas
+miliciano doctor
+miliciano repair
 ```
 
-3. Ejecuta bootstrap:
+---
+
+## 🔒 Seguridad
+
+### Política de Seguridad
+
+Miliciano bloquea automáticamente operaciones peligrosas:
 
 ```bash
-miliciano bootstrap
+# Esto será bloqueado
+miliciano exec "rm -rf /"
+# ❌ Bloqueado por política de seguridad: Dangerous pattern detected
+
+# Esto está permitido
+miliciano exec "ls -la /tmp"
+# ✓ Ejecutado correctamente
 ```
 
-4. Si quieres reintentar solo la convergencia/configuración:
+### Modos de Política
 
 ```bash
-miliciano setup --auto
+# Enforce (default): Bloquear operaciones peligrosas
+export NEMOCLAW_POLICY_MODE=enforce
+
+# Audit: Registrar pero permitir (para testing)
+export NEMOCLAW_POLICY_MODE=audit
+
+# Disabled: Sin checks (no recomendado)
+export NEMOCLAW_POLICY_MODE=disabled
 ```
 
-Qué intenta resolver `bootstrap`
+### Configurar Política
 
-- valida prerequisitos esenciales: `python3`, `node`, `npm`, `curl`
-- intenta instalar `Hermes` si le das un hook de instalación
-- instala `OpenClaw` por defecto con `npm install -g openclaw`
-- instala `Nemoclaw` por defecto con `npm install -g nemoclaw`
-- instala `Ollama` en modo user-space dentro de `~/.local` usando el release oficial de Linux
-- imprime follow-ups útiles antes de la convergencia final
-- guarda un reporte en `~/.config/miliciano/install-report.json`
-- luego ejecuta `miliciano setup --auto`
+Editar `~/.config/miliciano/policy.yaml`:
 
-Automatización por hooks
+```yaml
+mode: enforce
 
-Puedes controlar la instalación con variables de entorno. Cada componente acepta:
-- `*_INSTALL_CMD`
-- `*_INSTALL_URL`
+blocked_commands:
+  - pattern: "\\brm\\s+-rf\\b"
+    description: "Recursive deletion"
+    risk: critical
 
-Para personalizar la identidad del partner desde la instalación:
+allowed_commands:
+  - pattern: "^(ls|cat|grep)\\b"
+    description: "Read-only operations"
+    risk: low
+```
+
+Ver [docs/SECURITY.md](docs/SECURITY.md) para más detalles.
+
+---
+
+## 📊 Monitoreo
+
+### Logs
 
 ```bash
-MILICIANO_PARTNER_NAME
-MILICIANO_PERSONA
-MILICIANO_OWNER_NAME
-MILICIANO_LANGUAGE
-MILICIANO_INTERACTION_STYLE
+# Logs estructurados en JSON
+tail -f ~/.config/miliciano/logs/miliciano.log | jq .
+
+# Filtrar errores
+tail -f ~/.config/miliciano/logs/miliciano.log | jq 'select(.level=="ERROR")'
+
+# Eventos de seguridad
+tail -f ~/.config/miliciano/logs/miliciano.log | jq 'select(.event_type=="security")'
 ```
 
-Variables soportadas:
+### Health Check
 
 ```bash
-MILICIANO_HERMES_INSTALL_CMD
-MILICIANO_HERMES_INSTALL_URL
-MILICIANO_OPENCLAW_INSTALL_CMD
-MILICIANO_OPENCLAW_INSTALL_URL
-MILICIANO_NEMOCLAW_INSTALL_CMD
-MILICIANO_NEMOCLAW_INSTALL_URL
-MILICIANO_OLLAMA_INSTALL_CMD
-MILICIANO_OLLAMA_INSTALL_URL
+# HTTP endpoint (requiere Obsidian graph server corriendo)
+curl -s http://127.0.0.1:8765/health | jq .
 ```
 
-Ejemplos:
+### Audit Trail
 
 ```bash
-export MILICIANO_HERMES_INSTALL_CMD='comando-que-instala-hermes'
-export MILICIANO_OPENCLAW_INSTALL_CMD='npm install -g openclaw'
-export MILICIANO_NEMOCLAW_INSTALL_CMD='npm install -g nemoclaw'
-miliciano bootstrap
+# Ver últimas operaciones
+cat ~/.config/miliciano/audit.log | tail -10 | jq .
 ```
 
-Auth automática de OpenClaw
+---
 
-Si `OPENAI_API_KEY` está presente en la sesión, `miliciano setup --auto` intenta reutilizarla para resolver la auth básica de OpenClaw.
+## ⚙️ Configuración Avanzada
 
-Base local con Ollama
+### Variables de Entorno
 
-- Si Ollama ya está instalado pero su API no responde, `setup --auto` intenta levantar `ollama serve`.
-- Si la API responde pero no hay modelos descargados, Miliciano intenta bajar un modelo base recomendado según el hardware detectado.
-- En equipos modestos suele priorizar `qwen2.5:3b` como base local.
+Ver [.env.example](.env.example) para todas las opciones disponibles.
 
-Instrucciones por proyecto con `MILICIANO.md`
+```bash
+# Copiar template
+cp .env.example .env
 
-- Si existe un archivo `MILICIANO.md` en el repo actual o en un directorio padre, Miliciano lo carga como contexto operativo del proyecto.
-- Úsalo para definir idioma, estilo de respuesta, guardrails, estándares técnicos y prioridades del equipo.
-- `status` muestra si el archivo fue detectado.
-- Esta capa convive con la identidad del partner; la identidad define cómo habla Miliciano y `MILICIANO.md` define cómo se comporta dentro del proyecto.
+# Editar valores
+nano .env
 
-Ejemplo:
-
-```md
-# MILICIANO.md
-
-- Responde en español.
-- Haz cambios mínimos y verificables.
-- Explica acciones riesgosas antes de ejecutarlas.
+# Cargar en shell
+export $(cat .env | grep -v '^#' | xargs)
 ```
 
-Notas operativas
+---
 
-- El runtime principal sigue siendo el CLI Python incluido en `miliciano-poc/bin`.
-- `bootstrap` y `setup --auto` priorizan instalación sin `sudo` cuando pueden.
-- Para el instalador user-space de Ollama conviene tener `tar` y `zstd` disponibles.
-- `doctor` omite OpenClaw si el binario no existe, en vez de romper el flujo completo.
-- Miliciano enlaza `~/.hermes/.env` hacia `~/.hermes/profiles/miliciano/.env` cuando detecta que falta el `.env` del perfil.
-- `install-report.json` deja trazabilidad del último bootstrap/setup para revisar qué intentó hacer el instalador.
+## 🗂️ Arquitectura
+
+```
+┌─────────────────────────────────────────┐
+│         Usuario (CLI)                   │
+└──────────────┬──────────────────────────┘
+               │
+    ┌──────────┼──────────┐
+    │          │          │
+┌───▼───┐  ┌───▼────┐  ┌─▼──────┐
+│Hermes │  │OpenClaw│  │Nemoclaw│
+│ 🧠    │  │  ✋    │  │  🛡️    │
+│Razón  │  │Ejecución│ │Política│
+└───┬───┘  └───┬────┘  └─┬──────┘
+    │          │          │
+    └──────────┼──────────┘
+               │
+          ┌────▼─────┐
+          │ Obsidian │
+          │  Vault   │
+          │   📚     │
+          └──────────┘
+```
+
+Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para detalles completos.
+
+---
+
+## 🧪 Testing
+
+```bash
+# Dependencias de desarrollo
+python3 -m pip install -r requirements-dev.txt
+
+# Ejecutar suite principal
+npm test
+
+# Ejecutar pytest directo
+python3 -m pytest tests/ -v
+```
+
+Si tu entorno todavía no tiene `pytest`, mira [TESTING_SETUP.md](TESTING_SETUP.md).
+
+---
+
+## 📚 Documentación
+
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Arquitectura del sistema
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Empaquetado, Docker y despliegue
+- **[SECURITY.md](docs/SECURITY.md)** - Modelo de seguridad
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Solución de problemas
+- **[CHANGELOG.md](CHANGELOG.md)** - Historial de cambios
+- **[TESTING_SETUP.md](TESTING_SETUP.md)** - Setup de pruebas y cobertura
+
+---
+
+## 🛠️ Desarrollo
+
+### Estructura del Proyecto
+
+```
+miliciano/
+├── bin/miliciano.js              # Entry point
+├── miliciano-poc/bin/            # Scripts Python
+├── tests/                        # Suite de tests
+├── docs/                         # Documentación
+└── package.json                  # npm config
+```
+
+---
+
+## 🐛 Solución de Problemas
+
+Ver [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) para soluciones detalladas.
+
+Problemas comunes:
+- `miliciano shell` falla por dependencia faltante -> corre `miliciano setup`
+- wrapper npm no encuentra Python -> corre `miliciano repair`
+- rutas o provider no coinciden -> revisa `miliciano status` y `miliciano route sync`
+- tooling local roto -> inspecciona `miliciano tools health`
+
+---
+
+## 🔐 Seguridad
+
+Miliciano endurece entrada, ejecución y auditoría alrededor de Hermes/OpenClaw/Nemoclaw.
+
+Referencias rápidas:
+- [docs/SECURITY.md](docs/SECURITY.md)
+- [SECURITY_FIXES.md](SECURITY_FIXES.md)
+- `miliciano permission <enforce|audit|disabled>`
+
+---
+
+## 📜 Licencia
+
+MIT © Milytics
+
