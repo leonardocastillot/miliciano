@@ -199,7 +199,7 @@ jobs:
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [lint, security, test, integration, build, docs]
+    needs: [lint, security, test, integration, docs]
     if: always()
 
     steps:
@@ -209,5 +209,4 @@ jobs:
           echo "Security: ${{ needs.security.result }}"
           echo "Test: ${{ needs.test.result }}"
           echo "Integration: ${{ needs.integration.result }}"
-          echo "Build: ${{ needs.build.result }}"
           echo "Docs: ${{ needs.docs.result }}"
